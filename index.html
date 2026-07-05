@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>北海道行程小工具</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1 id="tripTitle">行程規劃</h1>
+</header>
+
+<main id="app">
+
+  <section id="tab-itinerary" class="tab-panel active">
+    <div id="itineraryList" class="day-list"></div>
+    <div id="itineraryEmpty" class="empty-state" hidden>
+      <p>還沒有行程資料。</p>
+      <p>請到「設定」分頁匯入你的 Excel 行程檔。</p>
+    </div>
+  </section>
+
+  <section id="tab-expense" class="tab-panel">
+    <div class="expense-summary" id="expenseSummary"></div>
+    <button class="btn-primary" id="addExpenseBtn">＋ 新增一筆帳</button>
+    <div id="expenseList" class="expense-list"></div>
+  </section>
+
+  <section id="tab-candidates" class="tab-panel">
+    <div class="candidate-toolbar">
+      <input type="text" id="candidateSearch" placeholder="搜尋地點...">
+      <select id="candidateCategoryFilter"></select>
+    </div>
+    <button class="btn-secondary" id="addCandidateBtn">＋ 手動新增地點</button>
+    <div id="candidateList" class="candidate-list"></div>
+    <div id="candidateEmpty" class="empty-state" hidden>
+      <p>還沒有候選地點。</p>
+      <p>可在「設定」分頁匯入 Excel 或 Google Maps 已存清單。</p>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab-panel">
+
+    <div class="card">
+      <h2>① 匯入 Excel 行程檔</h2>
+      <p class="hint">選擇你在電腦上編輯的行程 Excel（.xlsx）。會讀取「行程表」「Gemini  claude 行程安排」「住宿安排」「記帳」「簡單食物清單」「重要參考文章」等分頁。</p>
+      <input type="file" id="excelFileInput" accept=".xlsx,.xls">
+      <div id="excelImportResult" class="hint"></div>
+      <label class="checkbox-row">
+        <input type="checkbox" id="overwriteItinerary" checked>
+        覆蓋目前的行程／候選清單資料
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" id="overwriteExpense">
+        覆蓋目前的記帳資料（若不勾選則只新增沒有的項目）
+      </label>
+    </div>
+
+    <div class="card">
+      <h2>② 匯入 Google Maps 已存地點</h2>
+      <p class="hint">支援 Google Takeout 匯出的 <code>.json</code>、KML <code>.kml</code>，或含 Title/URL 欄位的 <code>.csv</code>。</p>
+      <input type="file" id="mapsFileInput" accept=".json,.kml,.csv">
+      <div id="mapsImportResult" class="hint"></div>
+      <details class="howto">
+        <summary>不知道怎麼匯出？點我看步驟</summary>
+        <ol>
+          <li>電腦開啟 <a href="https://takeout.google.com" target="_blank" rel="noopener">takeout.google.com</a>（登入你存地點用的 Google 帳號）。</li>
+          <li>按「取消全選」，只勾選 <b>Maps（您的地點）</b>。</li>
+          <li>建立匯出，等 Google 寄信通知後下載 zip 檔並解壓縮。</li>
+          <li>在資料夾裡找 <code>Saved Places.json</code>（或 <code>Takeout/Maps (your places)/</code> 底下的 json 檔）。</li>
+          <li>回到這裡上傳該 json 檔即可。</li>
+        </ol>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>③ 資料備份</h2>
+      <p class="hint">工具內的資料存在這支手機/瀏覽器本機。建議定期匯出備份，換裝置或清瀏覽器快取前務必先備份。</p>
+      <button class="btn-secondary" id="exportBackupBtn">匯出目前資料備份 (.json)</button>
+      <input type="file" id="restoreBackupInput" accept=".json" style="display:none">
+      <button class="btn-secondary" id="restoreBackupBtn">從備份還原</button>
+    </div>
+
+    <div class="card danger-card">
+      <h2>清除資料</h2>
+      <button class="btn-danger" id="clearAllBtn">清除本機所有資料</button>
+    </div>
+
+  </section>
+
+</main>
+
+<nav class="bottom-nav">
+  <button class="nav-btn active" data-tab="tab-itinerary">📅<span>行程</span></button>
+  <button class="nav-btn" data-tab="tab-expense">💰<span>記帳</span></button>
+  <button class="nav-btn" data-tab="tab-candidates">📍<span>候選</span></button>
+  <button class="nav-btn" data-tab="tab-settings">⚙️<span>設定</span></button>
+</nav>
+
+<div id="modalRoot"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
