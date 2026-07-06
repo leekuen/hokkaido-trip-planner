@@ -558,18 +558,62 @@ function openDayEditModal(dayId) {
 }
 
 /* ---------- expense modal ---------- */
+const CUSTOM_OPT = '__custom__';
+
+function expenseFieldOptions(field, seeds) {
+  const seen = new Set();
+  const opts = [];
+  for (const v of [...seeds, ...state.expenses.map((e) => e[field])]) {
+    const val = (v || '').trim();
+    if (val && !seen.has(val)) { seen.add(val); opts.push(val); }
+  }
+  return opts;
+}
+
+// A <select> of known values plus a 自訂 option that reveals a free-text input.
+function selectWithCustom(id, options, currentVal) {
+  const current = (currentVal || '').trim();
+  const list = current && !options.includes(current) ? [current, ...options] : options;
+  const selected = current || list[0] || '';
+  return `
+    <select id="${id}">
+      ${list.map((o) => `<option value="${escapeHtml(o)}" ${o === selected ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
+      <option value="${CUSTOM_OPT}">＋ 自訂...</option>
+    </select>
+    <input id="${id}-custom" placeholder="輸入新的選項" style="display:none; margin-top:6px;">
+  `;
+}
+
+function wireSelectWithCustom(id) {
+  const sel = $(`#${id}`);
+  const custom = $(`#${id}-custom`);
+  sel.addEventListener('change', () => {
+    custom.style.display = sel.value === CUSTOM_OPT ? 'block' : 'none';
+    if (sel.value === CUSTOM_OPT) custom.focus();
+  });
+}
+
+function readSelectWithCustom(id) {
+  const sel = $(`#${id}`);
+  return sel.value === CUSTOM_OPT ? $(`#${id}-custom`).value.trim() : sel.value;
+}
+
 function openExpenseModal(expId) {
   const exp = expId ? state.expenses.find((e) => e.id === expId) : null;
+  const categoryOpts = expenseFieldOptions('category', ['🚌 交通', '🏨 住宿', '🍜 飲食', '🎟️ 門票體驗', '🛍️ 購物', '📦 其他']);
+  const payerOpts = expenseFieldOptions('payer', ['婍瑞', '力堃']);
+  const methodOpts = expenseFieldOptions('method', ['CUBE', '現金']);
+  const today = toDateKey(new Date());
   openModal(`
     <h3>${exp ? '編輯' : '新增'}記帳</h3>
-    <div class="form-row"><label>日期</label><input id="f-date" type="date" value="${exp?.date || ''}"></div>
-    <div class="form-row"><label>大項目</label><input id="f-category" value="${escapeHtml(exp?.category || '')}" placeholder="🚌 交通 / 🏨 住宿 / 🍜 飲食..."></div>
+    <div class="form-row"><label>日期</label><input id="f-date" type="date" value="${exp?.date || today}"></div>
+    <div class="form-row"><label>大項目</label>${selectWithCustom('f-category', categoryOpts, exp?.category)}</div>
     <div class="form-row"><label>項目名稱</label><input id="f-name" value="${escapeHtml(exp?.name || '')}"></div>
     <div class="form-row"><label>公／私帳</label>
       <select id="f-ledger"><option ${exp?.ledger === '公帳' ? 'selected' : ''}>公帳</option><option ${exp?.ledger === '私帳' ? 'selected' : ''}>私帳</option></select>
     </div>
-    <div class="form-row"><label>支付人</label><input id="f-payer" value="${escapeHtml(exp?.payer || '')}"></div>
-    <div class="form-row"><label>支付方式</label><input id="f-method" value="${escapeHtml(exp?.method || '')}"></div>
+    <div class="form-row"><label>支付人</label>${selectWithCustom('f-payer', payerOpts, exp?.payer)}</div>
+    <div class="form-row"><label>支付方式</label>${selectWithCustom('f-method', methodOpts, exp?.method)}</div>
     <div class="form-row"><label>金額（日幣）</label><input id="f-jpy" type="number" value="${exp?.amountJPY ?? ''}"></div>
     <div class="form-row"><label>金額（台幣）</label><input id="f-twd" type="number" value="${exp?.amountTWD ?? ''}"></div>
     <div class="form-row"><label>備註</label><input id="f-note" value="${escapeHtml(exp?.note || '')}"></div>
@@ -579,15 +623,18 @@ function openExpenseModal(expId) {
       <button class="save-btn" id="btnSave">儲存</button>
     </div>
   `, () => {
+    wireSelectWithCustom('f-category');
+    wireSelectWithCustom('f-payer');
+    wireSelectWithCustom('f-method');
     $('#btnCancel').onclick = closeModal;
     $('#btnSave').onclick = () => {
       const data = {
         date: $('#f-date').value,
-        category: $('#f-category').value.trim(),
+        category: readSelectWithCustom('f-category'),
         name: $('#f-name').value.trim(),
         ledger: $('#f-ledger').value,
-        payer: $('#f-payer').value.trim(),
-        method: $('#f-method').value.trim(),
+        payer: readSelectWithCustom('f-payer'),
+        method: readSelectWithCustom('f-method'),
         amountJPY: parseAmount($('#f-jpy').value),
         amountTWD: parseAmount($('#f-twd').value),
         note: $('#f-note').value.trim(),
