@@ -38,7 +38,11 @@ let state = {
   expenses: [],
   candidates: [],
   sheetUrl: DEFAULT_SHEET_URL,
+  dirty: false,        // true = in-app itinerary/candidate edits exist; blocks auto-sync
+  lastSyncAt: null,
 };
+
+function markDirty() { state.dirty = true; }
 
 function loadState() {
   try {
@@ -518,11 +522,11 @@ function openItemModal(dayId, itemId) {
       };
       if (item) Object.assign(item, data);
       else day.items.push({ id: uid('item'), ...data });
-      saveState(); renderItinerary(); closeModal();
+      markDirty(); saveState(); renderItinerary(); closeModal();
     };
     if (item) $('#btnDelete').onclick = () => {
       day.items = day.items.filter((i) => i.id !== itemId);
-      saveState(); renderItinerary(); closeModal();
+      markDirty(); saveState(); renderItinerary(); closeModal();
     };
   });
 }
@@ -548,7 +552,7 @@ function openDayEditModal(dayId) {
       day.transport = $('#f-transport').value.trim();
       const accName = $('#f-acc-name').value.trim();
       day.accommodation = accName ? { name: accName, url: $('#f-acc-url').value.trim() || null } : null;
-      saveState(); renderItinerary(); closeModal();
+      markDirty(); saveState(); renderItinerary(); closeModal();
     };
   });
 }
@@ -622,11 +626,11 @@ function openCandidateModal(candId) {
       const data = { name, category: $('#f-category').value.trim(), desc: $('#f-desc').value.trim(), url: $('#f-url').value.trim() };
       if (cand) Object.assign(cand, data);
       else state.candidates.push({ id: uid('cand'), status: 'idle', source: 'manual', ...data });
-      saveState(); renderCandidates(); closeModal();
+      markDirty(); saveState(); renderCandidates(); closeModal();
     };
     if (cand) $('#btnDelete').onclick = () => {
       state.candidates = state.candidates.filter((c) => c.id !== candId);
-      saveState(); renderCandidates(); closeModal();
+      markDirty(); saveState(); renderCandidates(); closeModal();
     };
   });
 }
@@ -650,7 +654,7 @@ function openScheduleModal(candId) {
       const day = state.days.find((d) => d.id === $('#f-day').value);
       day.items.push({ id: uid('item'), period: $('#f-period').value.trim(), time: '', content: cand.name + (cand.desc ? `\n${cand.desc}` : ''), mapUrl: cand.url, fromCandidate: candId });
       cand.status = 'scheduled';
-      saveState(); renderItinerary(); renderCandidates(); closeModal();
+      markDirty(); saveState(); renderItinerary(); renderCandidates(); closeModal();
     };
   });
 }
@@ -675,9 +679,61 @@ function applyImport(wb, resultEl) {
       if (!existingKeys.has(`${exp.date}|${exp.name}`)) state.expenses.push(exp);
     }
   }
+  if (overwriteItin) state.dirty = false;
+  state.lastSyncAt = new Date().toISOString();
   saveState();
   renderItinerary(); renderExpenseList(); renderCandidates();
   resultEl.textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳。`;
+}
+
+/* ---------- auto-sync on open ---------- */
+function showToast(msg, ms = 3500) {
+  let el = $('#toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), ms);
+}
+
+async function fetchSheetWorkbook(sheetUrl) {
+  const idMatch = (sheetUrl || '').match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
+  if (!idMatch) throw new Error('試算表網址格式不對');
+  const resp = await fetch(`https://docs.google.com/spreadsheets/d/${idMatch[1]}/export?format=xlsx`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const buf = new Uint8Array(await resp.arrayBuffer());
+  return XLSX.read(buf, { type: 'array', cellDates: true });
+}
+
+async function autoSyncOnOpen() {
+  if (!state.sheetUrl) return;
+  if (state.dirty) {
+    showToast('⚠️ 你在工具內調整過行程，已暫停自動同步。要改用試算表版本請到「設定」按立即同步。', 6000);
+    return;
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  showToast('🔄 正在同步試算表...');
+  try {
+    const wb = await fetchSheetWorkbook(state.sheetUrl);
+    const parsed = importWorkbook(wb);
+    state.days = parsed.days;
+    state.candidates = parsed.candidates;
+    const existingKeys = new Set(state.expenses.map((x) => `${x.date}|${x.name}`));
+    for (const exp of parsed.expenses) {
+      if (!existingKeys.has(`${exp.date}|${exp.name}`)) state.expenses.push(exp);
+    }
+    state.dirty = false;
+    state.lastSyncAt = new Date().toISOString();
+    saveState();
+    renderItinerary(); renderExpenseList(); renderCandidates();
+    showToast(`✅ 已同步：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點`);
+  } catch (err) {
+    showToast('同步失敗（' + err.message + '），顯示上次的資料。', 5000);
+  }
 }
 
 /* ---------- tab switching ---------- */
@@ -709,14 +765,14 @@ function wireEvents() {
 
     if (action === 'add-item') openItemModal(dayId, null);
     if (action === 'edit-item') openItemModal(dayId, itemId);
-    if (action === 'delete-item') { day.items = day.items.filter((i) => i.id !== itemId); saveState(); renderItinerary(); }
+    if (action === 'delete-item') { day.items = day.items.filter((i) => i.id !== itemId); markDirty(); saveState(); renderItinerary(); }
     if (action === 'edit-day') openDayEditModal(dayId);
     if (action === 'move-up' || action === 'move-down') {
       const idx = day.items.findIndex((i) => i.id === itemId);
       const swapWith = action === 'move-up' ? idx - 1 : idx + 1;
       if (swapWith < 0 || swapWith >= day.items.length) return;
       [day.items[idx], day.items[swapWith]] = [day.items[swapWith], day.items[idx]];
-      saveState(); renderItinerary();
+      markDirty(); saveState(); renderItinerary();
     }
   });
 
@@ -738,26 +794,22 @@ function wireEvents() {
     const cand = state.candidates.find((c) => c.id === id);
     if (action === 'edit-candidate') openCandidateModal(id);
     if (action === 'schedule-candidate') openScheduleModal(id);
-    if (action === 'skip-candidate') { cand.status = 'skip'; saveState(); renderCandidates(); }
-    if (action === 'unskip-candidate') { cand.status = 'idle'; saveState(); renderCandidates(); }
-    if (action === 'delete-candidate') { state.candidates = state.candidates.filter((c) => c.id !== id); saveState(); renderCandidates(); }
+    if (action === 'skip-candidate') { cand.status = 'skip'; markDirty(); saveState(); renderCandidates(); }
+    if (action === 'unskip-candidate') { cand.status = 'idle'; markDirty(); saveState(); renderCandidates(); }
+    if (action === 'delete-candidate') { state.candidates = state.candidates.filter((c) => c.id !== id); markDirty(); saveState(); renderCandidates(); }
   });
 
   $('#syncSheetBtn').addEventListener('click', async () => {
     const resultEl = $('#sheetSyncResult');
     const url = $('#sheetUrlInput').value.trim();
-    const idMatch = url.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
-    if (!idMatch) { resultEl.textContent = '網址格式不對，請貼上 Google 試算表的完整連結。'; return; }
+    if (!/\/spreadsheets\/d\/[A-Za-z0-9_-]+/.test(url)) { resultEl.textContent = '網址格式不對，請貼上 Google 試算表的完整連結。'; return; }
     state.sheetUrl = url;
     resultEl.textContent = '下載中...';
     try {
-      const resp = await fetch(`https://docs.google.com/spreadsheets/d/${idMatch[1]}/export?format=xlsx`);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}（請確認試算表已設為「知道連結的使用者可檢視」）`);
-      const buf = new Uint8Array(await resp.arrayBuffer());
-      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      const wb = await fetchSheetWorkbook(url);
       applyImport(wb, resultEl);
     } catch (err) {
-      resultEl.textContent = '同步失敗：' + err.message;
+      resultEl.textContent = '同步失敗：' + err.message + '（請確認試算表已設為「知道連結的使用者可檢視」）';
     }
   });
 
@@ -822,3 +874,4 @@ function renderAll() {
 loadState();
 wireEvents();
 renderAll();
+autoSyncOnOpen();
