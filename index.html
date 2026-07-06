@@ -44,10 +44,11 @@
   <section id="tab-settings" class="tab-panel">
 
     <div class="card">
-      <h2>① 匯入 Excel 行程檔</h2>
-      <p class="hint">選擇你在電腦上編輯的行程 Excel（.xlsx）。會讀取「行程表」「Gemini  claude 行程安排」「住宿安排」「記帳」「簡單食物清單」「重要參考文章」等分頁。</p>
-      <input type="file" id="excelFileInput" accept=".xlsx,.xls">
-      <div id="excelImportResult" class="hint"></div>
+      <h2>① 從 Google 試算表同步</h2>
+      <p class="hint">在 Google 試算表編輯行程後，按一下同步即可更新（試算表需設為「知道連結的使用者可檢視」）。</p>
+      <div class="form-row"><label>試算表連結</label><input type="url" id="sheetUrlInput"></div>
+      <button class="btn-primary" id="syncSheetBtn">🔄 立即同步</button>
+      <div id="sheetSyncResult" class="hint"></div>
       <label class="checkbox-row">
         <input type="checkbox" id="overwriteItinerary" checked>
         覆蓋目前的行程／候選清單資料
@@ -56,6 +57,13 @@
         <input type="checkbox" id="overwriteExpense">
         覆蓋目前的記帳資料（若不勾選則只新增沒有的項目）
       </label>
+    </div>
+
+    <div class="card">
+      <h2>①b 匯入 Excel 行程檔（備用）</h2>
+      <p class="hint">也可以直接上傳 .xlsx 檔案，讀取的分頁與同步相同。</p>
+      <input type="file" id="excelFileInput" accept=".xlsx,.xls">
+      <div id="excelImportResult" class="hint"></div>
     </div>
 
     <div class="card">

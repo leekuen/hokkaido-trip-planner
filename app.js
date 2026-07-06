@@ -30,11 +30,14 @@ function parseAmount(v) {
 /* ---------- state ---------- */
 const STORAGE_KEY = 'hokkaidoTripData_v1';
 
+const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1IabCOL39Uzbl8ZxspX5u-GRz4WGOpJ461Ebn-K2njdQ/edit';
+
 let state = {
   tripTitle: '北海道行程規劃',
   days: [],
   expenses: [],
   candidates: [],
+  sheetUrl: DEFAULT_SHEET_URL,
 };
 
 function loadState() {
@@ -652,6 +655,31 @@ function openScheduleModal(candId) {
   });
 }
 
+/* ---------- shared import (Google Sheet sync & Excel upload) ---------- */
+function applyImport(wb, resultEl) {
+  const parsed = importWorkbook(wb);
+  const overwriteItin = $('#overwriteItinerary').checked;
+  const overwriteExp = $('#overwriteExpense').checked;
+
+  if (overwriteItin) {
+    if (state.days.length && !confirm('這會覆蓋目前工具內的行程與候選清單，確定要繼續嗎？')) { resultEl.textContent = '已取消。'; return; }
+    state.days = parsed.days;
+    state.candidates = parsed.candidates;
+  }
+  if (overwriteExp) {
+    if (state.expenses.length && !confirm('這會覆蓋目前工具內的所有記帳資料，確定要繼續嗎？')) { resultEl.textContent = '已取消。'; return; }
+    state.expenses = parsed.expenses;
+  } else {
+    const existingKeys = new Set(state.expenses.map((x) => `${x.date}|${x.name}`));
+    for (const exp of parsed.expenses) {
+      if (!existingKeys.has(`${exp.date}|${exp.name}`)) state.expenses.push(exp);
+    }
+  }
+  saveState();
+  renderItinerary(); renderExpenseList(); renderCandidates();
+  resultEl.textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳。`;
+}
+
 /* ---------- tab switching ---------- */
 function switchTab(tabId) {
   $$('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === tabId));
@@ -715,32 +743,30 @@ function wireEvents() {
     if (action === 'delete-candidate') { state.candidates = state.candidates.filter((c) => c.id !== id); saveState(); renderCandidates(); }
   });
 
+  $('#syncSheetBtn').addEventListener('click', async () => {
+    const resultEl = $('#sheetSyncResult');
+    const url = $('#sheetUrlInput').value.trim();
+    const idMatch = url.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
+    if (!idMatch) { resultEl.textContent = '網址格式不對，請貼上 Google 試算表的完整連結。'; return; }
+    state.sheetUrl = url;
+    resultEl.textContent = '下載中...';
+    try {
+      const resp = await fetch(`https://docs.google.com/spreadsheets/d/${idMatch[1]}/export?format=xlsx`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}（請確認試算表已設為「知道連結的使用者可檢視」）`);
+      const buf = new Uint8Array(await resp.arrayBuffer());
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      applyImport(wb, resultEl);
+    } catch (err) {
+      resultEl.textContent = '同步失敗：' + err.message;
+    }
+  });
+
   $('#excelFileInput').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const buf = new Uint8Array(await file.arrayBuffer());
     const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-    const parsed = importWorkbook(wb);
-    const overwriteItin = $('#overwriteItinerary').checked;
-    const overwriteExp = $('#overwriteExpense').checked;
-
-    if (overwriteItin) {
-      if (state.days.length && !confirm('這會覆蓋目前工具內的行程與候選清單，確定要繼續嗎？')) return;
-      state.days = parsed.days;
-      state.candidates = parsed.candidates;
-    }
-    if (overwriteExp) {
-      if (state.expenses.length && !confirm('這會覆蓋目前工具內的所有記帳資料，確定要繼續嗎？')) return;
-      state.expenses = parsed.expenses;
-    } else {
-      const existingKeys = new Set(state.expenses.map((x) => `${x.date}|${x.name}`));
-      for (const exp of parsed.expenses) {
-        if (!existingKeys.has(`${exp.date}|${exp.name}`)) state.expenses.push(exp);
-      }
-    }
-    saveState();
-    renderItinerary(); renderExpenseList(); renderCandidates();
-    $('#excelImportResult').textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳。`;
+    applyImport(wb, $('#excelImportResult'));
   });
 
   $('#mapsFileInput').addEventListener('change', async (e) => {
@@ -787,6 +813,7 @@ function wireEvents() {
 
 function renderAll() {
   $('#tripTitle').textContent = state.tripTitle || '行程規劃';
+  $('#sheetUrlInput').value = state.sheetUrl || DEFAULT_SHEET_URL;
   renderItinerary();
   renderExpenseList();
   renderCandidates();
