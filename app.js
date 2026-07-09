@@ -993,6 +993,38 @@ function wireEvents() {
     $('#expenseSyncResult').textContent = state.expenseSyncUrl ? '已儲存，之後新增的記帳會自動同步到雲端。' : '已清除，記帳將只存在本機。';
   });
 
+  $('#testConnectionBtn').addEventListener('click', async () => {
+    const resultEl = $('#expenseSyncResult');
+    const url = $('#expenseSyncUrlInput').value.trim();
+    if (!url) { resultEl.textContent = '請先填入網頁應用程式網址。'; return; }
+    resultEl.textContent = '連線測試中...';
+    try {
+      const resp = await fetch(url);
+      const text = await resp.text();
+      resultEl.textContent = resp.ok ? text : `連線失敗（HTTP ${resp.status}）：${text.slice(0, 200)}`;
+    } catch (err) {
+      resultEl.textContent = '連線失敗：' + err.message;
+    }
+  });
+
+  $('#testPostBtn').addEventListener('click', async () => {
+    const resultEl = $('#expenseSyncResult');
+    const url = $('#expenseSyncUrlInput').value.trim();
+    if (!url) { resultEl.textContent = '請先填入網頁應用程式網址。'; return; }
+    state.expenseSyncUrl = url;
+    saveState();
+    resultEl.textContent = '送出測試記帳中...';
+    try {
+      await pushExpenseToSheet({
+        date: toDateKey(new Date()), category: '🧪 測試', name: '🧪 連線測試（可刪除）',
+        ledger: '私帳', payer: '', method: '', amountJPY: 0, amountTWD: 0, note: '',
+      });
+      resultEl.textContent = '✅ 測試成功！請到試算表「記帳」分頁確認多了一列「🧪 連線測試」，確認後可手動刪除那列。';
+    } catch (err) {
+      resultEl.textContent = '❌ 測試失敗：' + err.message;
+    }
+  });
+
   $('#excelFileInput').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;

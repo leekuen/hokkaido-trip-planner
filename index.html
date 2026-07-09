@@ -120,6 +120,14 @@
     return ContentService.createTextOutput(JSON.stringify({status: 'error', message: err.message}))
       .setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+function doGet(e) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('記帳');
+  return ContentService.createTextOutput(
+    '✅ 記帳連動已就緒。試算表：' + SpreadsheetApp.getActiveSpreadsheet().getName() +
+    '，記帳分頁目前列數：' + (sheet ? sheet.getLastRow() : '找不到「記帳」分頁')
+  );
 }</pre>
         </div>
         <ol start="3">
@@ -129,9 +137,12 @@
           <li>第一次會要求「授權存取」：選你的帳號 → 若出現「未經驗證」畫面，點「進階」→「前往（不安全）」→ 允許。</li>
           <li>複製出現的網頁應用程式網址（結尾是 <code>/exec</code>），貼到下面欄位。</li>
         </ol>
+        <p class="hint">⚠️ 注意：不要用編輯器上方的「執行」按鈕測試，那個不會真的送出網路請求，程式碼會直接跳過（不會寫入試算表）。請用下面「測試連線」/「送出測試記帳」按鈕測試。若你之前已部署過、現在又改了程式碼，要到「部署 → 管理部署作業 → 編輯（鉛筆）→ 版本選『新版本』→ 部署」才會生效，直接存檔不會更新已部署的網址。</p>
       </details>
       <div class="form-row"><label>Apps Script 網頁應用程式網址</label><input type="url" id="expenseSyncUrlInput" placeholder="https://script.google.com/macros/s/.../exec"></div>
       <button class="btn-primary" id="saveExpenseSyncBtn">儲存設定</button>
+      <button class="btn-secondary" id="testConnectionBtn">🔍 測試連線</button>
+      <button class="btn-secondary" id="testPostBtn">🧪 送出測試記帳</button>
       <div id="expenseSyncResult" class="hint"></div>
     </div>
 
