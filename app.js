@@ -37,10 +37,23 @@ let state = {
   days: [],
   expenses: [],
   candidates: [],
+  shopping: [],
   sheetUrl: DEFAULT_SHEET_URL,
-  dirty: false,        // true = in-app itinerary/candidate edits exist; blocks auto-sync
+  dirty: false,        // true = in-app itinerary/candidate/shopping edits exist; blocks auto-sync
   lastSyncAt: null,
 };
+
+// Shopping progress (checked-off items) is precious, so re-import always merges
+// by (location, item) rather than overwriting: keep "bought" if it was already true,
+// and drop items no longer present in the sheet.
+function mergeShoppingList(existing, incoming) {
+  const key = (it) => `${it.location}|${it.item}`;
+  const existingMap = new Map(existing.map((it) => [key(it), it]));
+  return incoming.map((it) => {
+    const prev = existingMap.get(key(it));
+    return { id: prev ? prev.id : it.id, location: it.location, item: it.item, bought: (prev && prev.bought) || it.bought };
+  });
+}
 
 function markDirty() { state.dirty = true; }
 
@@ -138,24 +151,46 @@ function parseItineraryDetailSheet(ws) {
   return days;
 }
 
-/* ---------- Excel: Gemini/claude overview sheet ---------- */
-function parseOverviewSheet(ws) {
+/* ---------- date label formatting (行程表 is the sole source of day info) ---------- */
+const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
+function formatDateLabel(dateKey) {
+  const [y, m, d] = dateKey.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return `${m}/${d}（${WEEKDAYS[dt.getDay()]}）`;
+}
+// The block's free-text description usually starts by repeating "M/D（週X）地點",
+// so the highlight shown on the collapsed card is whatever comes after that first line.
+function deriveHighlight(description) {
+  if (!description) return '';
+  const lines = description.split('\n').filter(Boolean);
+  const rest = lines.slice(1).join(' ').trim();
+  if (!rest) return '';
+  return rest.length > 60 ? rest.slice(0, 60) + '…' : rest;
+}
+// Fallback when the day-header's 地點 cell is blank: the description's first
+// line repeats "M/D（週X）地點" (sometimes typo'd with a backslash), so strip that prefix.
+function derivePlaceFromDescription(description) {
+  if (!description) return '';
+  const firstLine = description.split('\n')[0];
+  return firstLine.replace(/^\d{1,2}[/\\]\d{1,2}（.）/, '').trim();
+}
+
+/* ---------- Excel: 待買清單 (shopping checklist) ---------- */
+function parseShoppingSheet(ws) {
   const grid = sheetToGrid(ws);
-  const out = new Map();
-  for (const row of grid) {
-    const a = cv(row, 0);
-    const m = typeof a === 'string' && a.match(/^(\d{1,2})\/(\d{1,2})/);
-    if (!m) continue;
-    const mmdd = `${m[1]}/${m[2]}`;
-    const entry = out.get(mmdd) || { dateLabel: '', place: '', highlight: '', transport: '' };
-    // The sheet stacks several revisions of the same table; later rows win only where non-empty.
-    entry.dateLabel = a || entry.dateLabel;
-    entry.place = cv(row, 1) || entry.place;
-    entry.highlight = cleanArrow(cv(row, 2)) || entry.highlight;
-    entry.transport = cv(row, 3) || entry.transport;
-    out.set(mmdd, entry);
+  const items = [];
+  for (let r = 1; r < grid.length; r++) {
+    const row = grid[r];
+    const item = cv(row, 1);
+    if (!item) continue;
+    items.push({
+      id: uid('shop'),
+      location: cv(row, 0),
+      item,
+      bought: /^true$/i.test(cv(row, 2)),
+    });
   }
-  return out;
+  return items;
 }
 
 /* ---------- Excel: candidate lists (stacked name/desc/link) ---------- */
@@ -245,55 +280,44 @@ function parseExpenseSheet(ws) {
   return items;
 }
 
-/* ---------- combine into day list ---------- */
-function buildDayList(overviewMap, detailDays) {
-  const detailByMmdd = new Map();
-  for (const d of detailDays) {
-    if (!d.dateKey) continue;
-    const [, mo, da] = d.dateKey.split('-');
-    detailByMmdd.set(`${parseInt(mo)}/${parseInt(da)}`, d);
-  }
-  const days = [];
-  for (const [mmdd, ov] of overviewMap.entries()) {
-    const detail = detailByMmdd.get(mmdd);
-    days.push({
-      id: uid('day'),
-      mmdd,
-      dateKey: detail ? detail.dateKey : null,
-      dateLabel: ov.dateLabel,
-      place: (detail && detail.place) || ov.place,
-      highlight: ov.highlight,
-      transport: ov.transport,
-      description: detail ? detail.description : '',
-      accommodation: detail ? detail.accommodation : null,
-      items: detail ? detail.items : [],
-      open: false,
-    });
-  }
-  return days;
+/* ---------- combine into day list (行程表 is the sole source) ---------- */
+function buildDayList(detailDays) {
+  return detailDays.map((detail, idx) => ({
+    id: uid('day'),
+    mmdd: detail.dateKey ? `${parseInt(detail.dateKey.split('-')[1])}/${parseInt(detail.dateKey.split('-')[2])}` : String(idx),
+    dateKey: detail.dateKey,
+    dateLabel: detail.dateKey ? formatDateLabel(detail.dateKey) : `第 ${idx + 1} 天`,
+    place: detail.place || derivePlaceFromDescription(detail.description),
+    highlight: deriveHighlight(detail.description),
+    transport: '',
+    description: detail.description || '',
+    accommodation: detail.accommodation,
+    items: detail.items,
+    open: false,
+  }));
 }
 
 /* ---------- full workbook import ---------- */
 function importWorkbook(wb) {
   const sheet = (name) => wb.Sheets[name];
-  const overviewSheetName = wb.SheetNames.find((n) => n.includes('Gemini'));
   const detailSheetName = wb.SheetNames.find((n) => n.includes('行程表'));
   const foodSheetName = wb.SheetNames.find((n) => n.includes('食物清單'));
   const refSheetName = wb.SheetNames.find((n) => n.includes('參考文章'));
   const accSheetName = wb.SheetNames.find((n) => n.includes('住宿安排'));
   const expSheetName = wb.SheetNames.find((n) => n.includes('記帳'));
+  const shoppingSheetName = wb.SheetNames.find((n) => n.includes('待買清單'));
 
-  const result = { days: [], expenses: [], candidates: [], accommodationOptions: [] };
+  const result = { days: [], expenses: [], candidates: [], accommodationOptions: [], shopping: [] };
 
-  if (overviewSheetName && detailSheetName) {
-    const overview = parseOverviewSheet(sheet(overviewSheetName));
+  if (detailSheetName) {
     const detail = parseItineraryDetailSheet(sheet(detailSheetName));
-    result.days = buildDayList(overview, detail);
+    result.days = buildDayList(detail);
   }
   if (foodSheetName) result.candidates.push(...parseStackedCandidateSheet(sheet(foodSheetName), foodSheetName));
   if (refSheetName) result.candidates.push(...parseLinkNoteSheet(sheet(refSheetName), refSheetName));
   if (accSheetName) result.accommodationOptions = parseAccommodationSheet(sheet(accSheetName));
   if (expSheetName) result.expenses = parseExpenseSheet(sheet(expSheetName));
+  if (shoppingSheetName) result.shopping = parseShoppingSheet(sheet(shoppingSheetName));
 
   return result;
 }
@@ -483,6 +507,35 @@ function renderCandidates() {
         ${c.status === 'idle' ? `<button data-action="skip-candidate">🙈 略過</button>` : `<button data-action="unskip-candidate">↩️ 還原</button>`}
         <button data-action="delete-candidate">🗑️</button>
       </div>
+    </div>
+  `).join('');
+}
+
+/* ---------- rendering: shopping list ---------- */
+function renderShopping() {
+  const empty = $('#shoppingEmpty');
+  const list = $('#shoppingList');
+  const summary = $('#shoppingSummary');
+  if (!state.shopping.length) { list.innerHTML = ''; summary.textContent = ''; empty.hidden = false; return; }
+  empty.hidden = true;
+  const bought = state.shopping.filter((s) => s.bought).length;
+  summary.textContent = `已買 ${bought} / ${state.shopping.length}`;
+
+  const groups = new Map();
+  for (const s of state.shopping) {
+    const key = s.location || '未分類';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  list.innerHTML = Array.from(groups.entries()).map(([location, items]) => `
+    <div class="shop-group">
+      <div class="shop-group-title">📍 ${escapeHtml(location)}</div>
+      ${items.map((s) => `
+        <label class="shop-item ${s.bought ? 'bought' : ''}" data-shop-id="${s.id}">
+          <input type="checkbox" data-action="toggle-shop" ${s.bought ? 'checked' : ''}>
+          <span>${escapeHtml(s.item)}</span>
+        </label>
+      `).join('')}
     </div>
   `).join('');
 }
@@ -717,6 +770,7 @@ function applyImport(wb, resultEl) {
     state.days = parsed.days;
     state.candidates = parsed.candidates;
   }
+  state.shopping = mergeShoppingList(state.shopping, parsed.shopping);
   if (overwriteExp) {
     if (state.expenses.length && !confirm('這會覆蓋目前工具內的所有記帳資料，確定要繼續嗎？')) { resultEl.textContent = '已取消。'; return; }
     state.expenses = parsed.expenses;
@@ -729,8 +783,8 @@ function applyImport(wb, resultEl) {
   if (overwriteItin) state.dirty = false;
   state.lastSyncAt = new Date().toISOString();
   saveState();
-  renderItinerary(); renderExpenseList(); renderCandidates();
-  resultEl.textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳。`;
+  renderItinerary(); renderExpenseList(); renderCandidates(); renderShopping();
+  resultEl.textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳、${parsed.shopping.length} 項待買。`;
 }
 
 /* ---------- auto-sync on open ---------- */
@@ -769,6 +823,7 @@ async function autoSyncOnOpen() {
     const parsed = importWorkbook(wb);
     state.days = parsed.days;
     state.candidates = parsed.candidates;
+    state.shopping = mergeShoppingList(state.shopping, parsed.shopping);
     const existingKeys = new Set(state.expenses.map((x) => `${x.date}|${x.name}`));
     for (const exp of parsed.expenses) {
       if (!existingKeys.has(`${exp.date}|${exp.name}`)) state.expenses.push(exp);
@@ -776,7 +831,7 @@ async function autoSyncOnOpen() {
     state.dirty = false;
     state.lastSyncAt = new Date().toISOString();
     saveState();
-    renderItinerary(); renderExpenseList(); renderCandidates();
+    renderItinerary(); renderExpenseList(); renderCandidates(); renderShopping();
     showToast(`✅ 已同步：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點`);
   } catch (err) {
     showToast('同步失敗（' + err.message + '），顯示上次的資料。', 5000);
@@ -844,6 +899,14 @@ function wireEvents() {
     if (action === 'skip-candidate') { cand.status = 'skip'; markDirty(); saveState(); renderCandidates(); }
     if (action === 'unskip-candidate') { cand.status = 'idle'; markDirty(); saveState(); renderCandidates(); }
     if (action === 'delete-candidate') { state.candidates = state.candidates.filter((c) => c.id !== id); markDirty(); saveState(); renderCandidates(); }
+  });
+
+  $('#shoppingList').addEventListener('change', (e) => {
+    if (e.target.dataset.action !== 'toggle-shop') return;
+    const row = e.target.closest('[data-shop-id]');
+    const item = state.shopping.find((s) => s.id === row.dataset.shopId);
+    item.bought = e.target.checked;
+    markDirty(); saveState(); renderShopping();
   });
 
   $('#syncSheetBtn').addEventListener('click', async () => {
@@ -916,9 +979,11 @@ function renderAll() {
   renderItinerary();
   renderExpenseList();
   renderCandidates();
+  renderShopping();
 }
 
 loadState();
+if (!Array.isArray(state.shopping)) state.shopping = []; // migrate pre-shopping-list saves
 wireEvents();
 renderAll();
 autoSyncOnOpen();

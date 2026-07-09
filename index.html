@@ -41,6 +41,15 @@
     </div>
   </section>
 
+  <section id="tab-shopping" class="tab-panel">
+    <div class="shop-summary" id="shoppingSummary"></div>
+    <div id="shoppingList" class="shop-list"></div>
+    <div id="shoppingEmpty" class="empty-state" hidden>
+      <p>還沒有待買清單。</p>
+      <p>請到「設定」分頁同步 Google 試算表的「待買清單」分頁。</p>
+    </div>
+  </section>
+
   <section id="tab-settings" class="tab-panel">
 
     <div class="card">
@@ -51,7 +60,7 @@
       <div id="sheetSyncResult" class="hint"></div>
       <label class="checkbox-row">
         <input type="checkbox" id="overwriteItinerary" checked>
-        覆蓋目前的行程／候選清單資料
+        覆蓋目前的行程／候選清單資料（待買清單一律安全合併，不會洗掉已勾選的項目）
       </label>
       <label class="checkbox-row">
         <input type="checkbox" id="overwriteExpense">
@@ -104,6 +113,7 @@
   <button class="nav-btn active" data-tab="tab-itinerary">📅<span>行程</span></button>
   <button class="nav-btn" data-tab="tab-expense">💰<span>記帳</span></button>
   <button class="nav-btn" data-tab="tab-candidates">📍<span>候選</span></button>
+  <button class="nav-btn" data-tab="tab-shopping">🛍️<span>待買</span></button>
   <button class="nav-btn" data-tab="tab-settings">⚙️<span>設定</span></button>
 </nav>
 
