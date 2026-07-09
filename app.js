@@ -38,6 +38,7 @@ let state = {
   expenses: [],
   candidates: [],
   shopping: [],
+  expenseDropdowns: null, // {category,ledger,payer,method} -> string[], read from the sheet's own dropdown validation
   sheetUrl: DEFAULT_SHEET_URL,
   expenseSyncUrl: '',  // Apps Script Web App /exec URL; if set, new expenses are also pushed to the sheet
   dirty: false,        // true = in-app itinerary/candidate/shopping edits exist; blocks auto-sync
@@ -96,6 +97,101 @@ function sheetToGrid(ws) {
 }
 const cv = (row, c) => (row && row[c] ? row[c].v : '');
 const cu = (row, c) => (row && row[c] ? row[c].url : null);
+
+/* ---------- lightweight zip reader (SheetJS doesn't expose data validation) ---------- */
+// .xlsx is a zip. We only need to pull specific small XML entries out, so a
+// minimal central-directory walk + raw-deflate inflate is enough — no library.
+async function inflateRawRaw(compBytes) {
+  const ds = new DecompressionStream('deflate-raw');
+  const writer = ds.writable.getWriter();
+  writer.write(compBytes);
+  writer.close();
+  const reader = ds.readable.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.length;
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+async function readZipEntryText(buf, entryName) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let eocd = -1;
+  const scanStart = Math.max(0, buf.length - 65557);
+  for (let i = buf.length - 22; i >= scanStart; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd === -1) return null;
+  const cdOffset = dv.getUint32(eocd + 16, true);
+  const cdEntries = dv.getUint16(eocd + 10, true);
+  let p = cdOffset;
+  const decoder = new TextDecoder('utf-8');
+  for (let i = 0; i < cdEntries; i++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true);
+    const compSize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const commentLen = dv.getUint16(p + 32, true);
+    const localHeaderOffset = dv.getUint32(p + 42, true);
+    const name = decoder.decode(buf.subarray(p + 46, p + 46 + nameLen));
+    if (name === entryName) {
+      const lNameLen = dv.getUint16(localHeaderOffset + 26, true);
+      const lExtraLen = dv.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + lNameLen + lExtraLen;
+      const compBytes = buf.subarray(dataStart, dataStart + compSize);
+      if (method === 0) return decoder.decode(compBytes);
+      if (method === 8) return decoder.decode(await inflateRawRaw(compBytes));
+      return null; // unsupported compression method
+    }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return null;
+}
+
+// Reads the "list"-type data-validation dropdown options straight from the
+// 記帳 sheet's XML, so category/ledger/payer/method choices always match
+// whatever the user has configured in Sheets — no hardcoded guesses to go stale.
+async function extractExpenseDropdowns(buf) {
+  try {
+    const workbookXml = await readZipEntryText(buf, 'xl/workbook.xml');
+    if (!workbookXml) return null;
+    const sheetTag = workbookXml.match(/<sheet\b[^>]*name="記帳"[^>]*\/>/);
+    const ridMatch = sheetTag && sheetTag[0].match(/r:id="(rId\d+)"/);
+    if (!ridMatch) return null;
+    const relsXml = await readZipEntryText(buf, 'xl/_rels/workbook.xml.rels');
+    if (!relsXml) return null;
+    const relMatch = relsXml.match(new RegExp(`<Relationship Id="${ridMatch[1]}"[^>]*Target="([^"]+)"`));
+    if (!relMatch) return null;
+    const sheetXml = await readZipEntryText(buf, 'xl/' + relMatch[1]);
+    if (!sheetXml) return null;
+
+    const colMap = { C: 'category', E: 'ledger', F: 'payer', G: 'method' };
+    const result = {};
+    for (const m of sheetXml.matchAll(/<dataValidation\b([^>]*)>([\s\S]*?)<\/dataValidation>/g)) {
+      const [, attrs, body] = m;
+      if (!/type="list"/.test(attrs)) continue;
+      const sqrefMatch = attrs.match(/sqref="([A-Z]+)\d+/);
+      const formulaMatch = body.match(/<formula1>([\s\S]*?)<\/formula1>/);
+      if (!sqrefMatch || !formulaMatch) continue;
+      const field = colMap[sqrefMatch[1]];
+      if (!field) continue;
+      const decoded = formulaMatch[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+      result[field] = decoded.replace(/^"|"$/g, '').split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    return Object.keys(result).length ? result : null;
+  } catch (e) {
+    console.error('extractExpenseDropdowns failed', e);
+    return null;
+  }
+}
 
 /* ---------- Excel: 行程表 (detailed day blocks) ---------- */
 function parseItineraryDetailSheet(ws) {
@@ -459,19 +555,21 @@ function escapeHtml(s) {
 
 /* ---------- rendering: expenses ---------- */
 function renderExpenseSummary() {
-  const totals = { '公帳_TWD': 0, '私帳_TWD': 0, '公帳_JPY': 0, '私帳_JPY': 0 };
+  // Bucket by whatever ledger values actually appear in the data (公帳/堃帳/婍帳/...)
+  // rather than assuming a fixed 公/私 split, since that's user-defined in Sheets.
+  const totals = new Map();
   for (const e of state.expenses) {
-    const ledger = e.ledger && e.ledger.includes('私') ? '私帳' : '公帳';
-    totals[`${ledger}_TWD`] += (e.actualTWD ?? e.amountTWD ?? 0) || 0;
-    totals[`${ledger}_JPY`] += e.amountJPY || 0;
+    const ledger = e.ledger || '未分類';
+    if (!totals.has(ledger)) totals.set(ledger, { TWD: 0, JPY: 0 });
+    const t = totals.get(ledger);
+    t.TWD += (e.actualTWD ?? e.amountTWD ?? 0) || 0;
+    t.JPY += e.amountJPY || 0;
   }
   const fmt = (n) => Math.round(n).toLocaleString();
-  $('#expenseSummary').innerHTML = `
-    <div><div class="total-label">公帳 (TWD)</div><div class="total-value">$${fmt(totals['公帳_TWD'])}</div></div>
-    <div><div class="total-label">私帳 (TWD)</div><div class="total-value">$${fmt(totals['私帳_TWD'])}</div></div>
-    <div><div class="total-label">公帳 (¥)</div><div class="total-value">¥${fmt(totals['公帳_JPY'])}</div></div>
-    <div><div class="total-label">私帳 (¥)</div><div class="total-value">¥${fmt(totals['私帳_JPY'])}</div></div>
-  `;
+  $('#expenseSummary').innerHTML = Array.from(totals.entries()).map(([ledger, t]) => `
+    <div><div class="total-label">${escapeHtml(ledger)} (TWD)</div><div class="total-value">$${fmt(t.TWD)}</div></div>
+    <div><div class="total-label">${escapeHtml(ledger)} (¥)</div><div class="total-value">¥${fmt(t.JPY)}</div></div>
+  `).join('');
 }
 
 function renderExpenseList() {
@@ -642,6 +740,11 @@ function openDayEditModal(dayId) {
 const CUSTOM_OPT = '__custom__';
 
 function expenseFieldOptions(field, seeds) {
+  // Prefer the authoritative dropdown list read straight from the sheet's own
+  // data-validation rules; only fall back to guessed seeds + history if that's unavailable.
+  if (state.expenseDropdowns && state.expenseDropdowns[field] && state.expenseDropdowns[field].length) {
+    return state.expenseDropdowns[field];
+  }
   const seen = new Set();
   const opts = [];
   for (const v of [...seeds, ...state.expenses.map((e) => e[field])]) {
@@ -681,18 +784,17 @@ function readSelectWithCustom(id) {
 
 function openExpenseModal(expId) {
   const exp = expId ? state.expenses.find((e) => e.id === expId) : null;
-  const categoryOpts = expenseFieldOptions('category', ['🚌 交通', '🏨 住宿', '🍜 飲食', '🎟️ 門票體驗', '🛍️ 購物', '📦 其他']);
-  const payerOpts = expenseFieldOptions('payer', ['婍瑞', '力堃']);
-  const methodOpts = expenseFieldOptions('method', ['CUBE', '現金']);
+  const categoryOpts = expenseFieldOptions('category', ['🚌 交通', '🏨 住宿', '🍜 三餐', '☕️ 小食', '🤡 娛樂', '🛍️ 伴手禮', '💲 其他']);
+  const ledgerOpts = expenseFieldOptions('ledger', ['公帳', '堃帳', '婍帳']);
+  const payerOpts = expenseFieldOptions('payer', ['力堃', '婍瑞']);
+  const methodOpts = expenseFieldOptions('method', ['現金', '刷卡', '電子支付', 'CUBE']);
   const today = toDateKey(new Date());
   openModal(`
     <h3>${exp ? '編輯' : '新增'}記帳</h3>
     <div class="form-row"><label>日期</label><input id="f-date" type="date" value="${exp?.date || today}"></div>
     <div class="form-row"><label>大項目</label>${selectWithCustom('f-category', categoryOpts, exp?.category)}</div>
     <div class="form-row"><label>項目名稱</label><input id="f-name" value="${escapeHtml(exp?.name || '')}"></div>
-    <div class="form-row"><label>公／私帳</label>
-      <select id="f-ledger"><option ${exp?.ledger === '公帳' ? 'selected' : ''}>公帳</option><option ${exp?.ledger === '私帳' ? 'selected' : ''}>私帳</option></select>
-    </div>
+    <div class="form-row"><label>帳戶</label>${selectWithCustom('f-ledger', ledgerOpts, exp?.ledger)}</div>
     <div class="form-row"><label>支付人</label>${selectWithCustom('f-payer', payerOpts, exp?.payer)}</div>
     <div class="form-row"><label>支付方式</label>${selectWithCustom('f-method', methodOpts, exp?.method)}</div>
     <div class="form-row"><label>金額（日幣）</label><input id="f-jpy" type="number" value="${exp?.amountJPY ?? ''}"></div>
@@ -705,6 +807,7 @@ function openExpenseModal(expId) {
     </div>
   `, () => {
     wireSelectWithCustom('f-category');
+    wireSelectWithCustom('f-ledger');
     wireSelectWithCustom('f-payer');
     wireSelectWithCustom('f-method');
     $('#btnCancel').onclick = closeModal;
@@ -713,7 +816,7 @@ function openExpenseModal(expId) {
         date: $('#f-date').value,
         category: readSelectWithCustom('f-category'),
         name: $('#f-name').value.trim(),
-        ledger: $('#f-ledger').value,
+        ledger: readSelectWithCustom('f-ledger'),
         payer: readSelectWithCustom('f-payer'),
         method: readSelectWithCustom('f-method'),
         amountJPY: parseAmount($('#f-jpy').value),
@@ -795,7 +898,7 @@ function openScheduleModal(candId) {
 }
 
 /* ---------- shared import (Google Sheet sync & Excel upload) ---------- */
-function applyImport(wb, resultEl) {
+async function applyImport(wb, resultEl, buf) {
   const parsed = importWorkbook(wb);
   const overwriteItin = $('#overwriteItinerary').checked;
   const overwriteExp = $('#overwriteExpense').checked;
@@ -804,6 +907,10 @@ function applyImport(wb, resultEl) {
     if (state.days.length && !confirm('這會覆蓋目前工具內的行程與候選清單，確定要繼續嗎？')) { resultEl.textContent = '已取消。'; return; }
     state.days = parsed.days;
     state.candidates = parsed.candidates;
+  }
+  if (buf) {
+    const dropdowns = await extractExpenseDropdowns(buf);
+    if (dropdowns) state.expenseDropdowns = dropdowns;
   }
   state.shopping = mergeShoppingList(state.shopping, parsed.shopping);
   if (overwriteExp) {
@@ -842,7 +949,8 @@ async function fetchSheetWorkbook(sheetUrl) {
   const resp = await fetch(`https://docs.google.com/spreadsheets/d/${idMatch[1]}/export?format=xlsx`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const buf = new Uint8Array(await resp.arrayBuffer());
-  return XLSX.read(buf, { type: 'array', cellDates: true });
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+  return { wb, buf };
 }
 
 /* ---------- push new expense to Google Sheet via Apps Script Web App ---------- */
@@ -872,10 +980,12 @@ async function autoSyncOnOpen() {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   showToast('🔄 正在同步試算表...');
   try {
-    const wb = await fetchSheetWorkbook(state.sheetUrl);
+    const { wb, buf } = await fetchSheetWorkbook(state.sheetUrl);
     const parsed = importWorkbook(wb);
     state.days = parsed.days;
     state.candidates = parsed.candidates;
+    const dropdowns = await extractExpenseDropdowns(buf);
+    if (dropdowns) state.expenseDropdowns = dropdowns;
     state.shopping = mergeShoppingList(state.shopping, parsed.shopping);
     const existingKeys = new Set(state.expenses.map((x) => `${x.date}|${x.name}`));
     for (const exp of parsed.expenses) {
@@ -969,8 +1079,8 @@ function wireEvents() {
     state.sheetUrl = url;
     resultEl.textContent = '下載中...';
     try {
-      const wb = await fetchSheetWorkbook(url);
-      applyImport(wb, resultEl);
+      const { wb, buf } = await fetchSheetWorkbook(url);
+      await applyImport(wb, resultEl, buf);
     } catch (err) {
       resultEl.textContent = '同步失敗：' + err.message + '（請確認試算表已設為「知道連結的使用者可檢視」）';
     }
@@ -1030,7 +1140,7 @@ function wireEvents() {
     if (!file) return;
     const buf = new Uint8Array(await file.arrayBuffer());
     const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-    applyImport(wb, $('#excelImportResult'));
+    await applyImport(wb, $('#excelImportResult'), buf);
   });
 
   $('#mapsFileInput').addEventListener('change', async (e) => {
