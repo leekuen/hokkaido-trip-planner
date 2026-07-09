@@ -93,7 +93,50 @@
     </div>
 
     <div class="card">
-      <h2>③ 資料備份</h2>
+      <h2>③ 記帳自動同步到雲端試算表（選填）</h2>
+      <p class="hint">設定好之後，往後每記一筆新的帳，會同時寫回 Google 試算表的「記帳」分頁（編輯/刪除只會影響本機，不會回寫）。</p>
+      <details class="howto">
+        <summary>還沒設定？點我看一次性設定步驟</summary>
+        <ol>
+          <li>打開你的 Google 試算表 → 上方選單「擴充功能」→「Apps Script」。</li>
+          <li>把編輯器裡原本的程式碼全部刪掉，貼上下面這段程式碼：</li>
+        </ol>
+        <div class="code-block-wrap">
+          <button class="btn-secondary copy-btn" id="copyAppsScriptBtn">📋 複製程式碼</button>
+          <pre id="appsScriptCode" class="code-block">function doPost(e) {
+  try {
+    var payload = JSON.parse(e.postData.contents);
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('記帳');
+    sheet.appendRow([
+      '', payload.date || '', payload.category || '', payload.name || '',
+      payload.ledger || '', payload.payer || '', payload.method || '',
+      payload.amountJPY != null ? payload.amountJPY : '',
+      payload.amountTWD != null ? payload.amountTWD : '',
+      payload.note || '', ''
+    ]);
+    return ContentService.createTextOutput(JSON.stringify({status: 'ok'}))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({status: 'error', message: err.message}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}</pre>
+        </div>
+        <ol start="3">
+          <li>按左上角磁碟片圖示存檔。</li>
+          <li>右上角「部署」→「新增部署作業」→ 齒輪圖示選「網頁應用程式」。</li>
+          <li>「具有存取權的使用者」選「所有人」，按「部署」。</li>
+          <li>第一次會要求「授權存取」：選你的帳號 → 若出現「未經驗證」畫面，點「進階」→「前往（不安全）」→ 允許。</li>
+          <li>複製出現的網頁應用程式網址（結尾是 <code>/exec</code>），貼到下面欄位。</li>
+        </ol>
+      </details>
+      <div class="form-row"><label>Apps Script 網頁應用程式網址</label><input type="url" id="expenseSyncUrlInput" placeholder="https://script.google.com/macros/s/.../exec"></div>
+      <button class="btn-primary" id="saveExpenseSyncBtn">儲存設定</button>
+      <div id="expenseSyncResult" class="hint"></div>
+    </div>
+
+    <div class="card">
+      <h2>④ 資料備份</h2>
       <p class="hint">工具內的資料存在這支手機/瀏覽器本機。建議定期匯出備份，換裝置或清瀏覽器快取前務必先備份。</p>
       <button class="btn-secondary" id="exportBackupBtn">匯出目前資料備份 (.json)</button>
       <input type="file" id="restoreBackupInput" accept=".json" style="display:none">

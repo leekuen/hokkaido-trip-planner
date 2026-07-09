@@ -39,6 +39,7 @@ let state = {
   candidates: [],
   shopping: [],
   sheetUrl: DEFAULT_SHEET_URL,
+  expenseSyncUrl: '',  // Apps Script Web App /exec URL; if set, new expenses are also pushed to the sheet
   dirty: false,        // true = in-app itinerary/candidate/shopping edits exist; blocks auto-sync
   lastSyncAt: null,
 };
@@ -720,9 +721,16 @@ function openExpenseModal(expId) {
         note: $('#f-note').value.trim(),
       };
       if (!data.name) return;
+      let newExp = null;
       if (exp) Object.assign(exp, data);
-      else state.expenses.push({ id: uid('exp'), actualTWD: null, ...data });
+      else { newExp = { id: uid('exp'), actualTWD: null, ...data }; state.expenses.push(newExp); }
       saveState(); renderExpenseList(); closeModal();
+      if (newExp && state.expenseSyncUrl) {
+        showToast('☁️ 正在同步到雲端試算表...');
+        pushExpenseToSheet(newExp)
+          .then(() => showToast('✅ 已同步到雲端試算表'))
+          .catch((err) => showToast('⚠️ 雲端同步失敗（已存在本機）：' + err.message, 5000));
+      }
     };
     if (exp) $('#btnDelete').onclick = () => {
       state.expenses = state.expenses.filter((e) => e.id !== expId);
@@ -835,6 +843,24 @@ async function fetchSheetWorkbook(sheetUrl) {
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const buf = new Uint8Array(await resp.arrayBuffer());
   return XLSX.read(buf, { type: 'array', cellDates: true });
+}
+
+/* ---------- push new expense to Google Sheet via Apps Script Web App ---------- */
+// Content-Type text/plain avoids a CORS preflight (Apps Script doesn't answer
+// OPTIONS), so this stays a "simple request" the browser sends directly.
+async function pushExpenseToSheet(exp) {
+  if (!state.expenseSyncUrl) return { skipped: true };
+  const resp = await fetch(state.expenseSyncUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({
+      date: exp.date, category: exp.category, name: exp.name, ledger: exp.ledger,
+      payer: exp.payer, method: exp.method, amountJPY: exp.amountJPY, amountTWD: exp.amountTWD, note: exp.note,
+    }),
+  });
+  const json = await resp.json().catch(() => null);
+  if (!resp.ok || !json || json.status !== 'ok') throw new Error((json && json.message) || `HTTP ${resp.status}`);
+  return json;
 }
 
 async function autoSyncOnOpen() {
@@ -950,6 +976,23 @@ function wireEvents() {
     }
   });
 
+  $('#copyAppsScriptBtn').addEventListener('click', async () => {
+    const code = $('#appsScriptCode').textContent;
+    try {
+      await navigator.clipboard.writeText(code);
+      $('#copyAppsScriptBtn').textContent = '✅ 已複製';
+      setTimeout(() => { $('#copyAppsScriptBtn').textContent = '📋 複製程式碼'; }, 2000);
+    } catch (e) {
+      alert('自動複製失敗，請手動選取上面的程式碼複製。');
+    }
+  });
+
+  $('#saveExpenseSyncBtn').addEventListener('click', () => {
+    state.expenseSyncUrl = $('#expenseSyncUrlInput').value.trim();
+    saveState();
+    $('#expenseSyncResult').textContent = state.expenseSyncUrl ? '已儲存，之後新增的記帳會自動同步到雲端。' : '已清除，記帳將只存在本機。';
+  });
+
   $('#excelFileInput').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1003,6 +1046,7 @@ function wireEvents() {
 function renderAll() {
   $('#tripTitle').textContent = state.tripTitle || '行程規劃';
   $('#sheetUrlInput').value = state.sheetUrl || DEFAULT_SHEET_URL;
+  $('#expenseSyncUrlInput').value = state.expenseSyncUrl || '';
   renderItinerary();
   renderExpenseList();
   renderCandidates();
