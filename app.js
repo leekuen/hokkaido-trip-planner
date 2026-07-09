@@ -51,7 +51,14 @@ function mergeShoppingList(existing, incoming) {
   const existingMap = new Map(existing.map((it) => [key(it), it]));
   return incoming.map((it) => {
     const prev = existingMap.get(key(it));
-    return { id: prev ? prev.id : it.id, location: it.location, item: it.item, bought: (prev && prev.bought) || it.bought };
+    return {
+      id: prev ? prev.id : it.id,
+      location: it.location,
+      item: it.item,
+      desc: it.desc || '',
+      searchTerm: it.searchTerm || '',
+      bought: (prev && prev.bought) || it.bought,
+    };
   });
 }
 
@@ -176,18 +183,32 @@ function derivePlaceFromDescription(description) {
 }
 
 /* ---------- Excel: 待買清單 (shopping checklist) ---------- */
+// Column order isn't stable (the sheet has already been reshuffled once), so
+// map by header text instead of fixed position.
 function parseShoppingSheet(ws) {
   const grid = sheetToGrid(ws);
+  if (!grid.length) return [];
+  const header = grid[0].map((c) => (c.v || '').replace(/[✅\s]/g, ''));
+  const findCol = (...keywords) => header.findIndex((h) => keywords.some((k) => h.includes(k)));
+  const idx = {
+    location: findCol('地點'),
+    item: findCol('品項'),
+    desc: findCol('說明', '推薦對象'),
+    bought: findCol('已買', '購買'),
+    searchTerm: findCol('搜尋', '部落客'),
+  };
   const items = [];
   for (let r = 1; r < grid.length; r++) {
     const row = grid[r];
-    const item = cv(row, 1);
+    const item = idx.item >= 0 ? cv(row, idx.item) : '';
     if (!item) continue;
     items.push({
       id: uid('shop'),
-      location: cv(row, 0),
+      location: idx.location >= 0 ? cv(row, idx.location) : '',
       item,
-      bought: /^true$/i.test(cv(row, 2)),
+      desc: idx.desc >= 0 ? cv(row, idx.desc) : '',
+      searchTerm: idx.searchTerm >= 0 ? cv(row, idx.searchTerm) : '',
+      bought: idx.bought >= 0 ? /^true$/i.test(cv(row, idx.bought)) : false,
     });
   }
   return items;
@@ -531,10 +552,16 @@ function renderShopping() {
     <div class="shop-group">
       <div class="shop-group-title">📍 ${escapeHtml(location)}</div>
       ${items.map((s) => `
-        <label class="shop-item ${s.bought ? 'bought' : ''}" data-shop-id="${s.id}">
-          <input type="checkbox" data-action="toggle-shop" ${s.bought ? 'checked' : ''}>
-          <span>${escapeHtml(s.item)}</span>
-        </label>
+        <div class="shop-item-row ${s.bought ? 'bought' : ''}">
+          <label class="shop-item" data-shop-id="${s.id}">
+            <input type="checkbox" data-action="toggle-shop" ${s.bought ? 'checked' : ''}>
+            <span class="shop-item-text">
+              <span class="shop-item-name">${escapeHtml(s.item)}</span>
+              ${s.desc ? `<span class="shop-item-desc">${escapeHtml(s.desc)}</span>` : ''}
+            </span>
+          </label>
+          ${s.searchTerm ? `<a class="shop-search-btn" target="_blank" rel="noopener" href="https://www.google.com/search?q=${encodeURIComponent(s.searchTerm)}" title="搜尋「${escapeHtml(s.searchTerm)}」">🔍</a>` : ''}
+        </div>
       `).join('')}
     </div>
   `).join('');
