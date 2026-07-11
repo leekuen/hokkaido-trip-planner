@@ -94,7 +94,7 @@
 
     <div class="card">
       <h2>③ 記帳自動同步到雲端試算表（選填）</h2>
-      <p class="hint">設定好之後，往後每記一筆新的帳，會同時寫回 Google 試算表的「記帳」分頁（編輯/刪除只會影響本機，不會回寫）。</p>
+      <p class="hint">設定好之後，新增、編輯、刪除記帳都會同步到 Google 試算表的「記帳」分頁。刪除時是把那一列內容清空（不是整列移除），避免影響其他列的位置。</p>
       <details class="howto">
         <summary>還沒設定？點我看一次性設定步驟</summary>
         <ol>
@@ -107,15 +107,42 @@
   try {
     var payload = JSON.parse(e.postData.contents);
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('記帳');
-    sheet.appendRow([
-      '', payload.date || '', payload.category || '', payload.name || '',
-      payload.ledger || '', payload.payer || '', payload.method || '',
-      payload.amountJPY != null ? payload.amountJPY : '',
-      payload.amountTWD != null ? payload.amountTWD : '',
-      payload.note || '', ''
-    ]);
-    return ContentService.createTextOutput(JSON.stringify({status: 'ok'}))
-      .setMimeType(ContentService.MimeType.JSON);
+    var action = payload.action || 'create';
+    var d = payload.data || {};
+
+    if (action === 'create') {
+      sheet.appendRow([
+        '', d.date || '', d.category || '', d.name || '',
+        d.ledger || '', d.payer || '', d.method || '',
+        d.amountJPY != null ? d.amountJPY : '',
+        d.amountTWD != null ? d.amountTWD : '',
+        d.note || '', ''
+      ]);
+      return ContentService.createTextOutput(JSON.stringify({status: 'ok', row: sheet.getLastRow()}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === 'update') {
+      if (!payload.row) throw new Error('缺少 row');
+      sheet.getRange(payload.row, 2, 1, 9).setValues([[
+        d.date || '', d.category || '', d.name || '', d.ledger || '',
+        d.payer || '', d.method || '',
+        d.amountJPY != null ? d.amountJPY : '',
+        d.amountTWD != null ? d.amountTWD : '',
+        d.note || ''
+      ]]);
+      return ContentService.createTextOutput(JSON.stringify({status: 'ok'}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === 'delete') {
+      if (!payload.row) throw new Error('缺少 row');
+      sheet.getRange(payload.row, 1, 1, 11).clearContent();
+      return ContentService.createTextOutput(JSON.stringify({status: 'ok'}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    throw new Error('未知的 action: ' + action);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({status: 'error', message: err.message}))
       .setMimeType(ContentService.MimeType.JSON);

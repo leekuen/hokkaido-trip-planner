@@ -383,6 +383,7 @@ function parseExpenseSheet(ws) {
     const dateVal = row[1] && row[1].isDate ? toDateKey(cv(row, 1)) : (cv(row, 1) || '');
     items.push({
       id: uid('exp'),
+      sheetRow: r + 1, // 1-indexed actual row in the 記帳 sheet, for later update/delete pushes
       date: dateVal,
       category: cv(row, 2),
       name,
@@ -824,20 +825,30 @@ function openExpenseModal(expId) {
         note: $('#f-note').value.trim(),
       };
       if (!data.name) return;
-      let newExp = null;
-      if (exp) Object.assign(exp, data);
-      else { newExp = { id: uid('exp'), actualTWD: null, ...data }; state.expenses.push(newExp); }
+      let target;
+      if (exp) { Object.assign(exp, data); target = exp; }
+      else { target = { id: uid('exp'), sheetRow: null, actualTWD: null, ...data }; state.expenses.push(target); }
       saveState(); renderExpenseList(); closeModal();
-      if (newExp && state.expenseSyncUrl) {
+      if (state.expenseSyncUrl) {
+        const action = target.sheetRow ? 'update' : 'create';
         showToast('☁️ 正在同步到雲端試算表...');
-        pushExpenseToSheet(newExp)
-          .then(() => showToast('✅ 已同步到雲端試算表'))
+        syncExpenseToSheet(action, target)
+          .then((res) => {
+            if (action === 'create' && res.row) { target.sheetRow = res.row; saveState(); }
+            showToast('✅ 已同步到雲端試算表');
+          })
           .catch((err) => showToast('⚠️ 雲端同步失敗（已存在本機）：' + err.message, 5000));
       }
     };
     if (exp) $('#btnDelete').onclick = () => {
       state.expenses = state.expenses.filter((e) => e.id !== expId);
       saveState(); renderExpenseList(); closeModal();
+      if (state.expenseSyncUrl && exp.sheetRow) {
+        showToast('☁️ 正在從雲端試算表刪除...');
+        syncExpenseToSheet('delete', exp)
+          .then(() => showToast('✅ 已從雲端試算表刪除'))
+          .catch((err) => showToast('⚠️ 雲端刪除失敗（本機已刪除）：' + err.message, 5000));
+      }
     };
   });
 }
@@ -917,16 +928,26 @@ async function applyImport(wb, resultEl, buf) {
     if (state.expenses.length && !confirm('這會覆蓋目前工具內的所有記帳資料，確定要繼續嗎？')) { resultEl.textContent = '已取消。'; return; }
     state.expenses = parsed.expenses;
   } else {
-    const existingKeys = new Set(state.expenses.map((x) => `${x.date}|${x.name}`));
-    for (const exp of parsed.expenses) {
-      if (!existingKeys.has(`${exp.date}|${exp.name}`)) state.expenses.push(exp);
-    }
+    mergeExpenses(parsed.expenses);
   }
   if (overwriteItin) state.dirty = false;
   state.lastSyncAt = new Date().toISOString();
   saveState();
   renderItinerary(); renderExpenseList(); renderCandidates(); renderShopping();
   resultEl.textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳、${parsed.shopping.length} 項待買。`;
+}
+
+// Add expenses that don't exist locally yet; for ones that do (matched by
+// date+name), backfill sheetRow if missing so update/delete pushes can find
+// the right row later, without touching any local edits already made.
+function mergeExpenses(incoming) {
+  const existingByKey = new Map(state.expenses.map((x) => [`${x.date}|${x.name}`, x]));
+  for (const exp of incoming) {
+    const key = `${exp.date}|${exp.name}`;
+    const existing = existingByKey.get(key);
+    if (!existing) state.expenses.push(exp);
+    else if (!existing.sheetRow && exp.sheetRow) existing.sheetRow = exp.sheetRow;
+  }
 }
 
 /* ---------- auto-sync on open ---------- */
@@ -956,14 +977,21 @@ async function fetchSheetWorkbook(sheetUrl) {
 /* ---------- push new expense to Google Sheet via Apps Script Web App ---------- */
 // Content-Type text/plain avoids a CORS preflight (Apps Script doesn't answer
 // OPTIONS), so this stays a "simple request" the browser sends directly.
-async function pushExpenseToSheet(exp) {
+// action: 'create' (no row yet -> append, script returns the new row number),
+// 'update' (overwrite exp.sheetRow in place), or 'delete' (blank out that row's
+// cells rather than actually deleting, so row numbers of OTHER expenses never shift).
+async function syncExpenseToSheet(action, exp) {
   if (!state.expenseSyncUrl) return { skipped: true };
   const resp = await fetch(state.expenseSyncUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({
-      date: exp.date, category: exp.category, name: exp.name, ledger: exp.ledger,
-      payer: exp.payer, method: exp.method, amountJPY: exp.amountJPY, amountTWD: exp.amountTWD, note: exp.note,
+      action,
+      row: exp.sheetRow || null,
+      data: {
+        date: exp.date, category: exp.category, name: exp.name, ledger: exp.ledger,
+        payer: exp.payer, method: exp.method, amountJPY: exp.amountJPY, amountTWD: exp.amountTWD, note: exp.note,
+      },
     }),
   });
   const json = await resp.json().catch(() => null);
@@ -987,10 +1015,7 @@ async function autoSyncOnOpen() {
     const dropdowns = await extractExpenseDropdowns(buf);
     if (dropdowns) state.expenseDropdowns = dropdowns;
     state.shopping = mergeShoppingList(state.shopping, parsed.shopping);
-    const existingKeys = new Set(state.expenses.map((x) => `${x.date}|${x.name}`));
-    for (const exp of parsed.expenses) {
-      if (!existingKeys.has(`${exp.date}|${exp.name}`)) state.expenses.push(exp);
-    }
+    mergeExpenses(parsed.expenses);
     state.dirty = false;
     state.lastSyncAt = new Date().toISOString();
     saveState();
@@ -1125,9 +1150,9 @@ function wireEvents() {
     saveState();
     resultEl.textContent = '送出測試記帳中...';
     try {
-      await pushExpenseToSheet({
+      await syncExpenseToSheet('create', {
         date: toDateKey(new Date()), category: '🧪 測試', name: '🧪 連線測試（可刪除）',
-        ledger: '私帳', payer: '', method: '', amountJPY: 0, amountTWD: 0, note: '',
+        ledger: '', payer: '', method: '', amountJPY: 0, amountTWD: 0, note: '',
       });
       resultEl.textContent = '✅ 測試成功！請到試算表「記帳」分頁確認多了一列「🧪 連線測試」，確認後可手動刪除那列。';
     } catch (err) {
