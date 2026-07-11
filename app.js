@@ -38,6 +38,7 @@ let state = {
   expenses: [],
   candidates: [],
   shopping: [],
+  placeRefs: [],
   expenseDropdowns: null, // {category,ledger,payer,method} -> string[], read from the sheet's own dropdown validation
   sheetUrl: DEFAULT_SHEET_URL,
   expenseSyncUrl: '',  // Apps Script Web App /exec URL; if set, new expenses are also pushed to the sheet
@@ -60,6 +61,24 @@ function mergeShoppingList(existing, incoming) {
       desc: it.desc || '',
       searchTerm: it.searchTerm || '',
       bought: (prev && prev.bought) || it.bought,
+    };
+  });
+}
+
+// Same safe-merge idea as shopping: preserve "visited" once true, key by (area, name).
+function mergePlaceRefs(existing, incoming) {
+  const key = (it) => `${it.area}|${it.name}`;
+  const existingMap = new Map(existing.map((it) => [key(it), it]));
+  return incoming.map((it) => {
+    const prev = existingMap.get(key(it));
+    return {
+      id: prev ? prev.id : it.id,
+      area: it.area,
+      name: it.name,
+      desc: it.desc || '',
+      timing: it.timing || '',
+      url: it.url,
+      visited: (prev && prev.visited) || it.visited,
     };
   });
 }
@@ -294,11 +313,12 @@ function parseShoppingSheet(ws) {
     bought: findCol('已買', '購買'),
     searchTerm: findCol('搜尋', '部落客'),
   };
+  const itemHeaderLabel = idx.item >= 0 ? grid[0][idx.item].v : null;
   const items = [];
   for (let r = 1; r < grid.length; r++) {
     const row = grid[r];
     const item = idx.item >= 0 ? cv(row, idx.item) : '';
-    if (!item) continue;
+    if (!item || item === itemHeaderLabel) continue; // skip repeated header rows re-pasted between sections
     items.push({
       id: uid('shop'),
       location: idx.location >= 0 ? cv(row, idx.location) : '',
@@ -306,6 +326,42 @@ function parseShoppingSheet(ws) {
       desc: idx.desc >= 0 ? cv(row, idx.desc) : '',
       searchTerm: idx.searchTerm >= 0 ? cv(row, idx.searchTerm) : '',
       bought: idx.bought >= 0 ? /^true$/i.test(cv(row, idx.bought)) : false,
+    });
+  }
+  return items;
+}
+
+/* ---------- Excel: 地點參考 (location-grouped nearby-places reference) ---------- */
+// One row per place already (not the stacked name/desc/link format), header-mapped
+// the same way as 待買清單 so future column reshuffles don't silently break it.
+function parsePlaceRefSheet(ws) {
+  const grid = sheetToGrid(ws);
+  if (!grid.length) return [];
+  const header = grid[0].map((c) => (c.v || '').replace(/[✅\s]/g, ''));
+  const findCol = (...keywords) => header.findIndex((h) => keywords.some((k) => h.includes(k)));
+  const idx = {
+    area: findCol('區域', '地區'),
+    name: findCol('店名', '名稱'),
+    desc: findCol('類型', '說明'),
+    timing: findCol('適合時段', '時段'),
+    url: findCol('連結', '地圖'),
+    visited: findCol('去過', '已訪'),
+  };
+  const nameHeaderLabel = idx.name >= 0 ? grid[0][idx.name].v : null;
+  const items = [];
+  for (let r = 1; r < grid.length; r++) {
+    const row = grid[r];
+    const name = idx.name >= 0 ? cv(row, idx.name) : '';
+    if (!name || name === nameHeaderLabel) continue; // skip repeated header rows the sheet re-pastes between sections
+    const rawUrl = idx.url >= 0 ? cv(row, idx.url) : '';
+    items.push({
+      id: uid('pref'),
+      area: idx.area >= 0 ? cv(row, idx.area) : '',
+      name,
+      desc: idx.desc >= 0 ? cv(row, idx.desc) : '',
+      timing: idx.timing >= 0 ? cv(row, idx.timing) : '',
+      url: extractMapsUrl(rawUrl) || (isUrl(rawUrl) ? rawUrl : buildMapsSearch(`${name} ${idx.area >= 0 ? cv(row, idx.area) : ''}`)),
+      visited: idx.visited >= 0 ? /^true$/i.test(cv(row, idx.visited)) : false,
     });
   }
   return items;
@@ -417,17 +473,27 @@ function buildDayList(detailDays) {
 }
 
 /* ---------- full workbook import ---------- */
+// When more than one sheet matches a pattern (e.g. the user keeps a dated
+// revision like "行程表_0712" alongside the original "行程表" after a
+// reschedule), prefer the LAST match -- new sheets get added after old ones,
+// so this picks the revision instead of silently reading stale data.
+function findLatestSheet(wb, keyword) {
+  const matches = wb.SheetNames.filter((n) => n.includes(keyword));
+  return matches.length ? matches[matches.length - 1] : undefined;
+}
+
 function importWorkbook(wb) {
   const sheet = (name) => wb.Sheets[name];
-  const detailSheetName = wb.SheetNames.find((n) => n.includes('行程表'));
-  const foodSheetName = wb.SheetNames.find((n) => n.includes('食物清單'));
-  const refSheetName = wb.SheetNames.find((n) => n.includes('參考文章'));
-  const placesSheetName = wb.SheetNames.find((n) => n.includes('可逛清單'));
-  const accSheetName = wb.SheetNames.find((n) => n.includes('住宿安排'));
-  const expSheetName = wb.SheetNames.find((n) => n.includes('記帳'));
-  const shoppingSheetName = wb.SheetNames.find((n) => n.includes('待買清單'));
+  const detailSheetName = findLatestSheet(wb, '行程表');
+  const foodSheetName = findLatestSheet(wb, '食物清單');
+  const refSheetName = findLatestSheet(wb, '參考文章');
+  const placesSheetName = findLatestSheet(wb, '可逛清單');
+  const placeRefSheetName = findLatestSheet(wb, '地點參考');
+  const accSheetName = findLatestSheet(wb, '住宿安排');
+  const expSheetName = findLatestSheet(wb, '記帳');
+  const shoppingSheetName = findLatestSheet(wb, '待買清單');
 
-  const result = { days: [], expenses: [], candidates: [], accommodationOptions: [], shopping: [] };
+  const result = { days: [], expenses: [], candidates: [], accommodationOptions: [], shopping: [], placeRefs: [] };
 
   if (detailSheetName) {
     const detail = parseItineraryDetailSheet(sheet(detailSheetName));
@@ -439,6 +505,7 @@ function importWorkbook(wb) {
   if (accSheetName) result.accommodationOptions = parseAccommodationSheet(sheet(accSheetName));
   if (expSheetName) result.expenses = parseExpenseSheet(sheet(expSheetName));
   if (shoppingSheetName) result.shopping = parseShoppingSheet(sheet(shoppingSheetName));
+  if (placeRefSheetName) result.placeRefs = parsePlaceRefSheet(sheet(placeRefSheetName));
 
   return result;
 }
@@ -669,6 +736,59 @@ function renderShopping() {
   `).join('');
 }
 
+/* ---------- rendering: place references (地點參考) ---------- */
+function populatePlaceRefAreaFilter() {
+  const sel = $('#placeRefAreaFilter');
+  const areas = Array.from(new Set(state.placeRefs.map((p) => p.area).filter(Boolean)));
+  const current = sel.value;
+  sel.innerHTML = `<option value="">全部區域</option>` + areas.map((a) => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+  sel.value = current;
+}
+
+function renderPlaceRefs() {
+  const empty = $('#placeRefEmpty');
+  const list = $('#placeRefList');
+  if (!state.placeRefs.length) { list.innerHTML = ''; empty.hidden = false; return; }
+  empty.hidden = true;
+  populatePlaceRefAreaFilter();
+
+  const search = $('#placeRefSearch').value.trim().toLowerCase();
+  const areaFilter = $('#placeRefAreaFilter').value;
+  const filtered = state.placeRefs.filter((p) => {
+    if (areaFilter && p.area !== areaFilter) return false;
+    if (search && !(`${p.name} ${p.desc}`.toLowerCase().includes(search))) return false;
+    return true;
+  });
+
+  const groups = new Map();
+  for (const p of filtered) {
+    const key = p.area || '未分類';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  list.innerHTML = Array.from(groups.entries()).map(([area, items]) => `
+    <div class="shop-group">
+      <div class="shop-group-title">📍 ${escapeHtml(area)}</div>
+      ${items.map((p) => `
+        <div class="pref-item-row ${p.visited ? 'visited' : ''}" data-pref-id="${p.id}">
+          <label class="shop-item">
+            <input type="checkbox" data-action="toggle-visited" ${p.visited ? 'checked' : ''}>
+            <span class="shop-item-text">
+              <span class="shop-item-name">${escapeHtml(p.name)}</span>
+              ${p.desc ? `<span class="shop-item-desc">${escapeHtml(p.desc)}</span>` : ''}
+              ${p.timing ? `<span class="pref-timing">🕒 ${escapeHtml(p.timing)}</span>` : ''}
+            </span>
+          </label>
+          <div class="pref-actions">
+            <a class="map-btn" target="_blank" rel="noopener" href="${p.url}">📍</a>
+            <button class="icon-btn" data-action="schedule-pref">📅</button>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `).join('');
+}
+
 /* ---------- modal helper ---------- */
 function openModal(html, onMount) {
   const root = $('#modalRoot');
@@ -886,15 +1006,14 @@ function openCandidateModal(candId) {
   });
 }
 
-function openScheduleModal(candId) {
-  const cand = state.candidates.find((c) => c.id === candId);
+function openScheduleModalFor(item, onScheduled) {
   if (!state.days.length) { alert('請先匯入或建立行程天數'); return; }
   openModal(`
-    <h3>把「${escapeHtml(cand.name)}」排入行程</h3>
+    <h3>把「${escapeHtml(item.name)}」排入行程</h3>
     <div class="form-row"><label>選擇日期</label>
       <select id="f-day">${state.days.map((d) => `<option value="${d.id}">${escapeHtml(d.dateLabel)} ${escapeHtml(d.place)}</option>`).join('')}</select>
     </div>
-    <div class="form-row"><label>時段（選填）</label><input id="f-period" placeholder="如：午餐"></div>
+    <div class="form-row"><label>時段（選填）</label><input id="f-period" placeholder="如：午餐" value="${escapeHtml(item.timing || '')}"></div>
     <div class="modal-actions">
       <button class="cancel-btn" id="btnCancel">取消</button>
       <button class="save-btn" id="btnSave">加入</button>
@@ -903,11 +1022,16 @@ function openScheduleModal(candId) {
     $('#btnCancel').onclick = closeModal;
     $('#btnSave').onclick = () => {
       const day = state.days.find((d) => d.id === $('#f-day').value);
-      day.items.push({ id: uid('item'), period: $('#f-period').value.trim(), time: '', content: cand.name + (cand.desc ? `\n${cand.desc}` : ''), mapUrl: cand.url, fromCandidate: candId });
-      cand.status = 'scheduled';
-      markDirty(); saveState(); renderItinerary(); renderCandidates(); closeModal();
+      day.items.push({ id: uid('item'), period: $('#f-period').value.trim(), time: '', content: item.name + (item.desc ? `\n${item.desc}` : ''), mapUrl: item.url });
+      markDirty(); saveState(); renderItinerary(); closeModal();
+      if (onScheduled) onScheduled();
     };
   });
+}
+
+function openScheduleModal(candId) {
+  const cand = state.candidates.find((c) => c.id === candId);
+  openScheduleModalFor(cand, () => { cand.status = 'scheduled'; saveState(); renderCandidates(); });
 }
 
 /* ---------- shared import (Google Sheet sync & Excel upload) ---------- */
@@ -926,6 +1050,7 @@ async function applyImport(wb, resultEl, buf) {
     if (dropdowns) state.expenseDropdowns = dropdowns;
   }
   state.shopping = mergeShoppingList(state.shopping, parsed.shopping);
+  state.placeRefs = mergePlaceRefs(state.placeRefs, parsed.placeRefs);
   if (overwriteExp) {
     if (state.expenses.length && !confirm('這會覆蓋目前工具內的所有記帳資料，確定要繼續嗎？')) { resultEl.textContent = '已取消。'; return; }
     state.expenses = parsed.expenses;
@@ -935,8 +1060,8 @@ async function applyImport(wb, resultEl, buf) {
   if (overwriteItin) state.dirty = false;
   state.lastSyncAt = new Date().toISOString();
   saveState();
-  renderItinerary(); renderExpenseList(); renderCandidates(); renderShopping();
-  resultEl.textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳、${parsed.shopping.length} 項待買。`;
+  renderItinerary(); renderExpenseList(); renderCandidates(); renderShopping(); renderPlaceRefs();
+  resultEl.textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳、${parsed.shopping.length} 項待買、${parsed.placeRefs.length} 個地點參考。`;
 }
 
 // Add expenses that don't exist locally yet; for ones that do (matched by
@@ -1017,11 +1142,12 @@ async function autoSyncOnOpen() {
     const dropdowns = await extractExpenseDropdowns(buf);
     if (dropdowns) state.expenseDropdowns = dropdowns;
     state.shopping = mergeShoppingList(state.shopping, parsed.shopping);
+    state.placeRefs = mergePlaceRefs(state.placeRefs, parsed.placeRefs);
     mergeExpenses(parsed.expenses);
     state.dirty = false;
     state.lastSyncAt = new Date().toISOString();
     saveState();
-    renderItinerary(); renderExpenseList(); renderCandidates(); renderShopping();
+    renderItinerary(); renderExpenseList(); renderCandidates(); renderShopping(); renderPlaceRefs();
     showToast(`✅ 已同步：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點`);
   } catch (err) {
     showToast('同步失敗（' + err.message + '），顯示上次的資料。', 5000);
@@ -1097,6 +1223,23 @@ function wireEvents() {
     const item = state.shopping.find((s) => s.id === row.dataset.shopId);
     item.bought = e.target.checked;
     markDirty(); saveState(); renderShopping();
+  });
+
+  $('#placeRefSearch').addEventListener('input', renderPlaceRefs);
+  $('#placeRefAreaFilter').addEventListener('change', renderPlaceRefs);
+  $('#placeRefList').addEventListener('change', (e) => {
+    if (e.target.dataset.action !== 'toggle-visited') return;
+    const row = e.target.closest('[data-pref-id]');
+    const item = state.placeRefs.find((p) => p.id === row.dataset.prefId);
+    item.visited = e.target.checked;
+    markDirty(); saveState(); renderPlaceRefs();
+  });
+  $('#placeRefList').addEventListener('click', (e) => {
+    const action = e.target.closest('[data-action]')?.dataset.action;
+    if (action !== 'schedule-pref') return;
+    const row = e.target.closest('[data-pref-id]');
+    const item = state.placeRefs.find((p) => p.id === row.dataset.prefId);
+    openScheduleModalFor(item);
   });
 
   $('#syncSheetBtn').addEventListener('click', async () => {
@@ -1220,10 +1363,12 @@ function renderAll() {
   renderExpenseList();
   renderCandidates();
   renderShopping();
+  renderPlaceRefs();
 }
 
 loadState();
 if (!Array.isArray(state.shopping)) state.shopping = []; // migrate pre-shopping-list saves
+if (!Array.isArray(state.placeRefs)) state.placeRefs = []; // migrate pre-placeRefs saves
 wireEvents();
 renderAll();
 autoSyncOnOpen();

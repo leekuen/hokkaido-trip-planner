@@ -50,6 +50,18 @@
     </div>
   </section>
 
+  <section id="tab-placerefs" class="tab-panel">
+    <div class="candidate-toolbar">
+      <input type="text" id="placeRefSearch" placeholder="搜尋地點...">
+      <select id="placeRefAreaFilter"></select>
+    </div>
+    <div id="placeRefList" class="shop-list"></div>
+    <div id="placeRefEmpty" class="empty-state" hidden>
+      <p>還沒有地點參考清單。</p>
+      <p>請到「設定」分頁同步 Google 試算表的「地點參考」分頁。</p>
+    </div>
+  </section>
+
   <section id="tab-settings" class="tab-panel">
 
     <div class="card">
@@ -194,6 +206,7 @@ function doGet(e) {
   <button class="nav-btn active" data-tab="tab-itinerary">📅<span>行程</span></button>
   <button class="nav-btn" data-tab="tab-expense">💰<span>記帳</span></button>
   <button class="nav-btn" data-tab="tab-candidates">📍<span>候選</span></button>
+  <button class="nav-btn" data-tab="tab-placerefs">🗺️<span>參考</span></button>
   <button class="nav-btn" data-tab="tab-shopping">🛍️<span>待買</span></button>
   <button class="nav-btn" data-tab="tab-settings">⚙️<span>設定</span></button>
 </nav>

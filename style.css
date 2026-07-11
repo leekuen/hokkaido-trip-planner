@@ -291,6 +291,22 @@ body {
   padding: 4px 6px;
 }
 
+/* ---- Place references (地點參考) ---- */
+.pref-item-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px dashed var(--border);
+}
+.pref-item-row:first-of-type { border-top: none; }
+.pref-item-row.visited .shop-item-name { text-decoration: line-through; color: var(--text-muted); }
+.pref-timing { font-size: 11px; color: var(--accent); }
+.pref-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.pref-actions .map-btn { padding: 4px 8px; }
+.pref-actions .icon-btn { font-size: 16px; }
+
 #toast {
   position: fixed;
   bottom: 76px;
