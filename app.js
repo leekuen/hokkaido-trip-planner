@@ -422,6 +422,7 @@ function importWorkbook(wb) {
   const detailSheetName = wb.SheetNames.find((n) => n.includes('行程表'));
   const foodSheetName = wb.SheetNames.find((n) => n.includes('食物清單'));
   const refSheetName = wb.SheetNames.find((n) => n.includes('參考文章'));
+  const placesSheetName = wb.SheetNames.find((n) => n.includes('可逛清單'));
   const accSheetName = wb.SheetNames.find((n) => n.includes('住宿安排'));
   const expSheetName = wb.SheetNames.find((n) => n.includes('記帳'));
   const shoppingSheetName = wb.SheetNames.find((n) => n.includes('待買清單'));
@@ -434,6 +435,7 @@ function importWorkbook(wb) {
   }
   if (foodSheetName) result.candidates.push(...parseStackedCandidateSheet(sheet(foodSheetName), foodSheetName));
   if (refSheetName) result.candidates.push(...parseLinkNoteSheet(sheet(refSheetName), refSheetName));
+  if (placesSheetName) result.candidates.push(...parseStackedCandidateSheet(sheet(placesSheetName), placesSheetName));
   if (accSheetName) result.accommodationOptions = parseAccommodationSheet(sheet(accSheetName));
   if (expSheetName) result.expenses = parseExpenseSheet(sheet(expSheetName));
   if (shoppingSheetName) result.shopping = parseShoppingSheet(sheet(shoppingSheetName));
