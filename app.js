@@ -1065,16 +1065,31 @@ async function applyImport(wb, resultEl, buf) {
   resultEl.textContent = `匯入完成：${parsed.days.length} 天行程、${parsed.candidates.length} 個候選地點、${parsed.expenses.length} 筆記帳、${parsed.shopping.length} 項待買、${parsed.placeRefs.length} 個地點參考。`;
 }
 
-// Add expenses that don't exist locally yet; for ones that do (matched by
-// date+name), backfill sheetRow if missing so update/delete pushes can find
-// the right row later, without touching any local edits already made.
+// Merge freshly-parsed sheet rows into local expenses. A row's sheetRow is
+// the authoritative identity once known (not date+name, which changes
+// whenever someone edits the name or date) - so a known row is refreshed in
+// place from the sheet, and dropped if the row no longer has data there
+// (deleted elsewhere). Local expenses with no sheetRow yet (added offline or
+// before sync was configured) are left untouched unless they match an
+// unseen incoming row by date+name, in which case that row's number is
+// attached to them instead of creating a duplicate.
 function mergeExpenses(incoming) {
-  const existingByKey = new Map(state.expenses.map((x) => [`${x.date}|${x.name}`, x]));
-  for (const exp of incoming) {
-    const key = `${exp.date}|${exp.name}`;
-    const existing = existingByKey.get(key);
-    if (!existing) state.expenses.push(exp);
-    else if (!existing.sheetRow && exp.sheetRow) existing.sheetRow = exp.sheetRow;
+  const incomingByRow = new Map(incoming.filter((x) => x.sheetRow).map((x) => [x.sheetRow, x]));
+  const localByKey = new Map(state.expenses.filter((x) => !x.sheetRow).map((x) => [`${x.date}|${x.name}`, x]));
+
+  state.expenses = state.expenses.filter((x) => {
+    if (!x.sheetRow) return true;
+    const fresh = incomingByRow.get(x.sheetRow);
+    if (!fresh) return false;
+    Object.assign(x, fresh);
+    incomingByRow.delete(x.sheetRow);
+    return true;
+  });
+
+  for (const exp of incomingByRow.values()) {
+    const local = localByKey.get(`${exp.date}|${exp.name}`);
+    if (local) Object.assign(local, exp);
+    else state.expenses.push(exp);
   }
 }
 
