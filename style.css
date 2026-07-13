@@ -307,6 +307,17 @@ body {
 .pref-actions .map-btn { padding: 4px 8px; }
 .pref-actions .icon-btn { font-size: 16px; }
 
+.sync-warning {
+  background: #fdf1e0;
+  border: 1px solid #e8b96a;
+  color: #7a4a12;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin-bottom: 10px;
+}
+
 #toast {
   position: fixed;
   bottom: 76px;

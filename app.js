@@ -643,6 +643,7 @@ function renderExpenseSummary() {
 }
 
 function renderExpenseList() {
+  $('#expenseSyncWarning').hidden = !!state.expenseSyncUrl;
   const list = $('#expenseList');
   const sorted = [...state.expenses].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   list.innerHTML = sorted.map((e) => `
@@ -1270,6 +1271,7 @@ function wireEvents() {
   $('#saveExpenseSyncBtn').addEventListener('click', () => {
     state.expenseSyncUrl = $('#expenseSyncUrlInput').value.trim();
     saveState();
+    renderExpenseList();
     $('#expenseSyncResult').textContent = state.expenseSyncUrl ? '已儲存，之後新增的記帳會自動同步到雲端。' : '已清除，記帳將只存在本機。';
   });
 
@@ -1293,6 +1295,7 @@ function wireEvents() {
     if (!url) { resultEl.textContent = '請先填入網頁應用程式網址。'; return; }
     state.expenseSyncUrl = url;
     saveState();
+    renderExpenseList();
     resultEl.textContent = '送出測試記帳中...';
     try {
       await syncExpenseToSheet('create', {
