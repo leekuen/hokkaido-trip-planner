@@ -108,8 +108,8 @@
     </div>
 
     <div class="card">
-      <h2>③ 記帳自動同步到雲端試算表（選填）</h2>
-      <p class="hint">設定好之後，新增、編輯、刪除記帳都會同步到 Google 試算表的「記帳」分頁。刪除時是把那一列內容清空（不是整列移除），避免影響其他列的位置。</p>
+      <h2>③ 記帳／行程自動同步到雲端試算表（選填）</h2>
+      <p class="hint">設定好之後，新增、編輯、刪除記帳都會同步到 Google 試算表的「記帳」分頁（刪除時是把那一列內容清空，不是整列移除，避免影響其他列的位置）。同一組設定也會把「編輯既有行程項目」（時間、內容）同步到「行程表」分頁；新增/刪除行程項目、編輯當天地點住宿目前還只存在本機，之後才會支援。</p>
       <details class="howto">
         <summary>還沒設定？點我看一次性設定步驟</summary>
         <ol>
@@ -153,6 +153,16 @@
     if (action === 'delete') {
       if (!payload.row) throw new Error('缺少 row');
       sheet.getRange(payload.row, 1, 1, 11).clearContent();
+      return ContentService.createTextOutput(JSON.stringify({status: 'ok'}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === 'update-item') {
+      if (!payload.row) throw new Error('缺少 row');
+      var itinSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('行程表');
+      var lines = (d.content || '').split('\n');
+      itinSheet.getRange(payload.row, 2).setValue(d.time || '');
+      itinSheet.getRange(payload.row, 3, 1, 2).setValues([[lines[0] || '', lines.slice(1).join('\n')]]);
       return ContentService.createTextOutput(JSON.stringify({status: 'ok'}))
         .setMimeType(ContentService.MimeType.JSON);
     }

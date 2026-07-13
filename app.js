@@ -263,6 +263,7 @@ function parseItineraryDetailSheet(ws) {
     for (let c = 0; c < row.length; c++) { if (cu(row, c)) { mapUrl = cu(row, c); break; } }
     current.items.push({
       id: uid('item'),
+      rowIndex: r + 1, // 1-indexed actual row in the 行程表 sheet, for later update pushes
       period: current.lastPeriod,
       time: b,
       content,
@@ -826,6 +827,12 @@ function openItemModal(dayId, itemId) {
       if (item) Object.assign(item, data);
       else day.items.push({ id: uid('item'), ...data });
       markDirty(); saveState(); renderItinerary(); closeModal();
+      if (item && item.rowIndex && state.expenseSyncUrl) {
+        showToast('☁️ 正在同步到雲端試算表...');
+        syncItineraryItemToSheet(item)
+          .then(() => showToast('✅ 已同步到雲端試算表'))
+          .catch((err) => showToast('⚠️ 雲端同步失敗（已存在本機）：' + err.message, 5000));
+      }
     };
     if (item) $('#btnDelete').onclick = () => {
       day.items = day.items.filter((i) => i.id !== itemId);
@@ -1117,29 +1124,40 @@ async function fetchSheetWorkbook(sheetUrl) {
   return { wb, buf };
 }
 
-/* ---------- push new expense to Google Sheet via Apps Script Web App ---------- */
+/* ---------- push edits to Google Sheet via Apps Script Web App ---------- */
 // Content-Type text/plain avoids a CORS preflight (Apps Script doesn't answer
 // OPTIONS), so this stays a "simple request" the browser sends directly.
-// action: 'create' (no row yet -> append, script returns the new row number),
-// 'update' (overwrite exp.sheetRow in place), or 'delete' (blank out that row's
-// cells rather than actually deleting, so row numbers of OTHER expenses never shift).
-async function syncExpenseToSheet(action, exp) {
+async function postToSheetSync(action, row, data) {
   if (!state.expenseSyncUrl) return { skipped: true };
   const resp = await fetch(state.expenseSyncUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({
-      action,
-      row: exp.sheetRow || null,
-      data: {
-        date: exp.date, category: exp.category, name: exp.name, ledger: exp.ledger,
-        payer: exp.payer, method: exp.method, amountJPY: exp.amountJPY, amountTWD: exp.amountTWD, note: exp.note,
-      },
-    }),
+    body: JSON.stringify({ action, row: row || null, data }),
   });
   const json = await resp.json().catch(() => null);
   if (!resp.ok || !json || json.status !== 'ok') throw new Error((json && json.message) || `HTTP ${resp.status}`);
   return json;
+}
+
+// action: 'create' (no row yet -> append, script returns the new row number),
+// 'update' (overwrite exp.sheetRow in place), or 'delete' (blank out that row's
+// cells rather than actually deleting, so row numbers of OTHER expenses never shift).
+function syncExpenseToSheet(action, exp) {
+  return postToSheetSync(action, exp.sheetRow, {
+    date: exp.date, category: exp.category, name: exp.name, ledger: exp.ledger,
+    payer: exp.payer, method: exp.method, amountJPY: exp.amountJPY, amountTWD: exp.amountTWD, note: exp.note,
+  });
+}
+
+// Itinerary items only support 'update-item' so far (time + content of a row
+// that was already parsed from the 行程表 sheet, i.e. has a rowIndex). Adding
+// or deleting items would shift every row below it, including every later
+// day's rows, which the sheet's grouped-block layout isn't built to survive
+// safely yet - deferred to a bigger redesign after the trip. Period (column A,
+// forward-filled across a block) and the map link (whichever column happens
+// to carry it) are left untouched for the same reason.
+function syncItineraryItemToSheet(item) {
+  return postToSheetSync('update-item', item.rowIndex, { time: item.time, content: item.content });
 }
 
 async function autoSyncOnOpen() {
