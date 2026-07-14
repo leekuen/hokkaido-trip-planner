@@ -872,13 +872,16 @@ const CUSTOM_OPT = '__custom__';
 
 function expenseFieldOptions(field, seeds) {
   // Prefer the authoritative dropdown list read straight from the sheet's own
-  // data-validation rules; only fall back to guessed seeds + history if that's unavailable.
-  if (state.expenseDropdowns && state.expenseDropdowns[field] && state.expenseDropdowns[field].length) {
-    return state.expenseDropdowns[field];
-  }
+  // data-validation rules, falling back to the guessed seeds if that's unavailable.
+  // Either way, also fold in any value already used in saved expenses (e.g. a
+  // 自訂 one-off typed in before) so it becomes pickable again next time,
+  // instead of only ever showing up on the one record it was typed for.
+  const base = (state.expenseDropdowns && state.expenseDropdowns[field] && state.expenseDropdowns[field].length)
+    ? state.expenseDropdowns[field]
+    : seeds;
   const seen = new Set();
   const opts = [];
-  for (const v of [...seeds, ...state.expenses.map((e) => e[field])]) {
+  for (const v of [...base, ...state.expenses.map((e) => e[field])]) {
     const val = (v || '').trim();
     if (val && !seen.has(val)) { seen.add(val); opts.push(val); }
   }
